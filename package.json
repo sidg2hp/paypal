@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "check": "node --check src/core.js && node --check src/server.js && node --check tests/core.test.js"
+    "check": "node --check src/core.js && node --check src/server.js && node --check tests/core.test.js && node --check public/app.js"
   },
   "engines": {
     "node": ">=22 <23"
