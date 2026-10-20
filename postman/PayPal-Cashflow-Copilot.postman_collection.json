@@ -7,7 +7,13 @@
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:3000" },
     { "key": "invoiceId", "value": "inv_seed_001" },
-    { "key": "paypalInvoiceId", "value": "MOCK-INV-SEED-001" }
+    { "key": "paypalInvoiceId", "value": "MOCK-INV-SEED-001" },
+    { "key": "paypalWebhookId", "value": "replace-with-paypal-webhook-id" },
+    { "key": "paypalTransmissionId", "value": "replace-with-paypal-transmission-id" },
+    { "key": "paypalTransmissionTime", "value": "replace-with-paypal-transmission-time" },
+    { "key": "paypalCertUrl", "value": "replace-with-paypal-cert-url" },
+    { "key": "paypalAuthAlgo", "value": "SHA256withRSA" },
+    { "key": "paypalTransmissionSig", "value": "replace-with-paypal-transmission-signature" }
   ],
   "item": [
     {
@@ -16,6 +22,10 @@
         {
           "name": "Get dashboard state",
           "request": { "method": "GET", "url": "{{baseUrl}}/api/state" }
+        },
+        {
+          "name": "Get explainable cashflow insights",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/insights" }
         },
         {
           "name": "Parse invoice intent",
@@ -33,6 +43,31 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": { "mode": "raw", "raw": "{\n  \"eventType\": \"INVOICING.INVOICE.PAID\",\n  \"invoiceId\": \"{{invoiceId}}\"\n}" },
             "url": "{{baseUrl}}/api/webhooks/simulate"
+          }
+        },
+        {
+          "name": "Remind invoice",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/invoices/{{invoiceId}}/remind"
+          }
+        },
+        {
+          "name": "Receive verified PayPal webhook",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "PayPal-Transmission-Id", "value": "{{paypalTransmissionId}}" },
+              { "key": "PayPal-Transmission-Time", "value": "{{paypalTransmissionTime}}" },
+              { "key": "PayPal-Cert-Url", "value": "{{paypalCertUrl}}" },
+              { "key": "PayPal-Auth-Algo", "value": "{{paypalAuthAlgo}}" },
+              { "key": "PayPal-Transmission-Sig", "value": "{{paypalTransmissionSig}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"id\": \"replace-with-paypal-event-id\",\n  \"event_type\": \"INVOICING.INVOICE.PAID\",\n  \"resource\": {\"invoice_id\": \"{{invoiceId}}\"}\n}" },
+            "url": "{{baseUrl}}/api/webhooks/paypal",
+            "description": "Requires a public HTTPS deployment, PAYPAL_WEBHOOK_ID, and real PayPal signature headers. Do not use placeholder values against a real endpoint."
           }
         }
       ]
