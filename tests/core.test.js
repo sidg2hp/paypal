@@ -39,6 +39,7 @@ test('parser extracts customer, line items, tax and deterministic totals offline
   assert.equal(parsed.total, 351);
   assert.equal(parsed.items.length, 2);
   assert.equal(parsed.dueDate, '2026-12-01');
+  assert.equal(parseInvoiceText('Invoice for Relative Buyer <relative@example.com>\n1 audit at $100\ndue in 15 days', { now: new Date('2026-10-20T00:00:00.000Z') }).dueDate, '2026-11-04');
 });
 
 test('totals use rounded cents and reject invalid items', () => {

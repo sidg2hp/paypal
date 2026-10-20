@@ -143,12 +143,13 @@ function extractCustomer(text) {
   return { name: name || 'Customer', email };
 }
 
-function parseDueDate(text) {
+function parseDueDate(text, baseDate = new Date()) {
   const absolute = text.match(/(?:due|pay(?:able)?\s+by)\s*(?:date)?\s*[:=]?\s*(\d{4}-\d{2}-\d{2})/i);
   if (absolute) return validateDate(absolute[1]);
   const relative = text.match(/due\s+in\s+(\d{1,3})\s+days?/i);
   if (relative) {
-    const due = new Date('2026-01-01T00:00:00.000Z');
+    const due = new Date(baseDate);
+    if (Number.isNaN(due.getTime())) throw new ValidationError('base date must be valid');
     due.setUTCDate(due.getUTCDate() + Number(relative[1]));
     return due.toISOString().slice(0, 10);
   }
@@ -183,7 +184,7 @@ function parseItems(text) {
   return items;
 }
 
-function parseInvoiceText(input, { openAIHook } = {}) {
+function parseInvoiceText(input, { openAIHook, now = new Date() } = {}) {
   // Optional OpenAI-compatible seam: the app never performs a network call by
   // itself. An integrator can inject a parser when OPENAI_API_KEY is present;
   // otherwise this deterministic parser is always used.
@@ -202,7 +203,7 @@ function parseInvoiceText(input, { openAIHook } = {}) {
   return {
     customer: { name: customer.name, ...(customer.email ? { email: customer.email } : {}) },
     currency: extractCurrency(text),
-    dueDate: parseDueDate(text),
+    dueDate: parseDueDate(text, now),
     ...(notesMatch ? { notes: notesMatch[1].trim() } : {}),
     ...totals
   };
