@@ -20,6 +20,10 @@
       "name": "Local app",
       "item": [
         {
+          "name": "Health and capabilities",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/health" }
+        },
+        {
           "name": "Get dashboard state",
           "request": { "method": "GET", "url": "{{baseUrl}}/api/state" }
         },
