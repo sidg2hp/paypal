@@ -36,17 +36,18 @@ The human approval gate is intentional. AI prepares and explains a financial act
 ## API
 
 - `GET /api/state` — seeded invoices, summary totals, and active adapter.
+- `GET /api/health` — secret-free service health with adapter, mode (`mock` or `sandbox`), process uptime in seconds, and supported capabilities.
 - `GET /api/insights` — deterministic per-invoice risk, urgency, confidence and reason codes, projected incoming cash for 7/14/30 days, and the highest-priority next action.
 - `POST /api/parse-invoice` with `{ "text": "Invoice for ... 2 hours at $150/hour" }` — deterministic offline parsing.
 - `POST /api/invoices` — validate and create an in-memory draft.
 - `POST /api/invoices/:id/send` — create/send through mock PayPal or the sandbox REST adapter.
 - `POST /api/invoices/:id/remind` — send a PayPal invoice reminder through the mock or sandbox adapter and add an explainable timeline event.
-- `POST /api/webhooks/simulate` with `{ "eventType": "INVOICING.INVOICE.PAID", "invoiceId": "..." }` — apply a supported invoice event.
+- `POST /api/webhooks/simulate` with `{ "eventType": "INVOICING.INVOICE.PAID", "invoiceId": "..." }` — apply a supported invoice event. Lifecycle transitions are monotonic (`DRAFT → SENT → PAID/CANCELLED/VOID`); duplicate sends are rejected and stale webhooks are acknowledged without changing a terminal invoice.
 - `POST /api/webhooks/paypal` — receive a real PayPal webhook only after verifying its signature through PayPal's `/v1/notifications/verify-webhook-signature` endpoint.
 
 The sandbox adapter uses PayPal OAuth at `/v1/oauth2/token` and Invoicing API endpoints at `/v2/invoicing/invoices`, including `/remind`. Secrets are read from environment variables and are never included in application logs or API responses. Webhook simulation is intentionally demo-safe and idempotent: replaying the same event (or the same event type for an invoice when no event id is supplied) does not add another timeline entry. Real webhook ingestion is stricter: it requires `PAYPAL_WEBHOOK_ID`, PayPal signature headers, and a successful PayPal verification response before changing invoice state.
 
-When `OPENAI_API_KEY` is configured, `/api/parse-invoice` uses the OpenAI-compatible `/chat/completions` endpoint (`OPENAI_BASE_URL` and `OPENAI_MODEL` are optional overrides). The request asks for structured JSON, validates the result, and falls back silently to the deterministic parser on provider, network, or malformed-response failures. The API key and provider response are never logged. Tests inject a fetch implementation and remain offline.
+When `OPENAI_API_KEY` is configured, `/api/parse-invoice` uses the OpenAI-compatible `/chat/completions` endpoint (`OPENAI_BASE_URL` and `OPENAI_MODEL` are optional overrides). The request asks for structured JSON, validates the result, and falls back silently to the deterministic parser on provider, network, timeout, or malformed-response failures. Outbound AI and PayPal requests are bounded to 10 seconds by default; override with `AI_TIMEOUT_MS`, `PAYPAL_TIMEOUT_MS`, or the shared `OUTBOUND_TIMEOUT_MS` (maximum 120 seconds). The API key and provider response are never logged. Tests inject a fetch implementation and remain offline.
 
 ## Test and check
 

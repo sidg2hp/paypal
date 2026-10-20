@@ -2,6 +2,53 @@
 
 const DEFAULT_CURRENCY = 'USD';
 const MAX_BODY_TEXT = 8000;
+const DEFAULT_OUTBOUND_TIMEOUT_MS = 10000;
+const MAX_OUTBOUND_TIMEOUT_MS = 120000;
+const INVOICE_TRANSITIONS = Object.freeze({
+  DRAFT: Object.freeze(['SENT']),
+  SENT: Object.freeze(['PAID', 'CANCELLED', 'VOID'])
+});
+
+function normalizeTimeout(value, fallback = DEFAULT_OUTBOUND_TIMEOUT_MS) {
+  const timeout = Number(value);
+  return Number.isFinite(timeout) && timeout > 0 ? Math.max(1, Math.min(Math.floor(timeout), MAX_OUTBOUND_TIMEOUT_MS)) : fallback;
+}
+
+function timeoutError(label) {
+  const error = new Error(`${label} timed out`);
+  error.code = 'ETIMEDOUT';
+  return error;
+}
+
+async function fetchWithTimeout(fetchImpl, url, options, timeoutMs, label) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const request = Promise.resolve().then(() => fetchImpl(url, { ...options, signal: controller.signal }));
+  const timeout = new Promise((resolve, reject) => {
+    const timeoutTimer = setTimeout(() => reject(timeoutError(label)), timeoutMs);
+    request.then(() => clearTimeout(timeoutTimer), () => clearTimeout(timeoutTimer));
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } catch (error) {
+    if (controller.signal.aborted) throw timeoutError(label);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function withTimeout(promise, timeoutMs, label) {
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(timeoutError(label)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 class ValidationError extends Error {
   constructor(message, details) {
@@ -247,13 +294,14 @@ async function parseInvoiceTextAsync(input, {
   fetchImpl = globalThis.fetch,
   baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
   model = process.env.OPENAI_MODEL || 'gpt-4o-mini',
+  timeoutMs = normalizeTimeout(process.env.AI_TIMEOUT_MS || process.env.OUTBOUND_TIMEOUT_MS),
   now = new Date()
 } = {}) {
   if (!apiKey) return parseInvoiceText(input, { now });
   if (typeof fetchImpl !== 'function') return parseInvoiceText(input, { now });
   try {
     if (typeof input !== 'string' || input.trim().length < 3 || input.length > MAX_BODY_TEXT) throw new ValidationError(`text must be between 3 and ${MAX_BODY_TEXT} characters`);
-    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
+    const response = await fetchWithTimeout(fetchImpl, `${baseUrl.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -264,8 +312,8 @@ async function parseInvoiceTextAsync(input, {
           { role: 'user', content: input.trim() }
         ]
       })
-    });
-    const body = await safeJson(response);
+    }, normalizeTimeout(timeoutMs), 'AI extraction request');
+    const body = await safeJson(response, normalizeTimeout(timeoutMs), 'AI extraction response');
     if (!response.ok) throw new Error(`AI extraction failed (${response.status})`);
     const content = body?.choices?.[0]?.message?.content;
     return normalizeAiExtraction(parseAiJson(content), now);
@@ -391,7 +439,7 @@ class MockPayPalAdapter {
 }
 
 class PayPalSandboxAdapter {
-  constructor({ clientId, clientSecret, fetchImpl = globalThis.fetch, baseUrl = 'https://api-m.sandbox.paypal.com' } = {}) {
+  constructor({ clientId, clientSecret, fetchImpl = globalThis.fetch, baseUrl = 'https://api-m.sandbox.paypal.com', timeoutMs = normalizeTimeout(process.env.PAYPAL_TIMEOUT_MS || process.env.OUTBOUND_TIMEOUT_MS) } = {}) {
     if (!clientId || !clientSecret) throw new Error('PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET are required together');
     if (typeof fetchImpl !== 'function') throw new Error('fetch is required for the PayPal sandbox adapter');
     this.name = 'paypal-sandbox';
@@ -399,36 +447,47 @@ class PayPalSandboxAdapter {
     this.clientSecret = clientSecret;
     this.fetch = fetchImpl;
     this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.timeoutMs = normalizeTimeout(timeoutMs);
     this.token = null;
   }
 
   async accessToken() {
     if (this.token && this.token.expiresAt > Date.now() + 30000) return this.token.value;
-    const response = await this.fetch(`${this.baseUrl}/v1/oauth2/token`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64')}`,
-        Accept: 'application/json',
-        'Accept-Language': 'en_US',
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: 'grant_type=client_credentials'
-    });
-    const body = await safeJson(response);
-    if (!response.ok || !body?.access_token) throw new PayPalError('PayPal authentication failed');
-    this.token = { value: body.access_token, expiresAt: Date.now() + Number(body.expires_in || 300) * 1000 };
-    return this.token.value;
+    try {
+      const response = await fetchWithTimeout(this.fetch, `${this.baseUrl}/v1/oauth2/token`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64')}`,
+          Accept: 'application/json',
+          'Accept-Language': 'en_US',
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: 'grant_type=client_credentials'
+      }, this.timeoutMs, 'PayPal authentication request');
+      const body = await safeJson(response, this.timeoutMs, 'PayPal authentication response');
+      if (!response.ok || !body?.access_token) throw new PayPalError('PayPal authentication failed');
+      this.token = { value: body.access_token, expiresAt: Date.now() + Number(body.expires_in || 300) * 1000 };
+      return this.token.value;
+    } catch (error) {
+      if (error.code === 'ETIMEDOUT') throw new PayPalError('PayPal authentication request timed out');
+      throw error;
+    }
   }
 
   async request(path, options = {}) {
-    const token = await this.accessToken();
-    const response = await this.fetch(`${this.baseUrl}${path}`, {
-      ...options,
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(options.headers || {}) }
-    });
-    const body = await safeJson(response);
-    if (!response.ok) throw new PayPalError(`PayPal request failed (${response.status})`);
-    return body;
+    try {
+      const token = await this.accessToken();
+      const response = await fetchWithTimeout(this.fetch, `${this.baseUrl}${path}`, {
+        ...options,
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(options.headers || {}) }
+      }, this.timeoutMs, 'PayPal API request');
+      const body = await safeJson(response, this.timeoutMs, 'PayPal API response');
+      if (!response.ok) throw new PayPalError(`PayPal request failed (${response.status})`);
+      return body;
+    } catch (error) {
+      if (error.code === 'ETIMEDOUT') throw new PayPalError('PayPal API request timed out');
+      throw error;
+    }
   }
 
   async createInvoice(invoice) {
@@ -474,8 +533,14 @@ class PayPalSandboxAdapter {
   }
 }
 
-async function safeJson(response) {
-  try { return await response.json(); } catch { return null; }
+async function safeJson(response, timeoutMs, label = 'response') {
+  try {
+    const body = response.json();
+    return timeoutMs ? await withTimeout(body, timeoutMs, label) : await body;
+  } catch (error) {
+    if (error.code === 'ETIMEDOUT') throw error;
+    return null;
+  }
 }
 
 function dateOnly(value) {
@@ -598,6 +663,7 @@ class InvoiceStore {
     this.clock = clock;
     this.invoices = new Map(seed.map((invoice) => [invoice.id, clone(invoice)]));
     this.sequence = 1;
+    this.pendingSends = new Set();
   }
 
   listInvoices() { return clone([...this.invoices.values()]); }
@@ -635,18 +701,24 @@ class InvoiceStore {
 
   async sendInvoice(id) {
     const invoice = this.getInvoice(id);
-    if (invoice.status === 'PAID') throw new ValidationError('a paid invoice cannot be sent');
-    if (invoice.status === 'CANCELLED' || invoice.status === 'VOID') throw new ValidationError(`a ${invoice.status.toLowerCase()} invoice cannot be sent`);
-    if (!invoice.paypalInvoiceId) {
-      const remote = await this.adapter.createInvoice(invoice);
-      if (!remote?.id) throw new PayPalError('PayPal did not return an invoice id');
-      invoice.paypalInvoiceId = remote.id;
+    if (invoice.status === 'SENT') throw new ValidationError('invoice has already been sent');
+    if (invoice.status !== 'DRAFT') throw new ValidationError(`a ${invoice.status.toLowerCase()} invoice cannot be sent`);
+    if (this.pendingSends.has(id)) throw new ValidationError('invoice is already being sent');
+    this.pendingSends.add(id);
+    try {
+      if (!invoice.paypalInvoiceId) {
+        const remote = await this.adapter.createInvoice(invoice);
+        if (!remote?.id) throw new PayPalError('PayPal did not return an invoice id');
+        invoice.paypalInvoiceId = remote.id;
+      }
+      await this.adapter.sendInvoice(invoice.paypalInvoiceId);
+      invoice.status = 'SENT';
+      invoice.updatedAt = this.clock();
+      invoice.events.push({ type: 'INVOICING.INVOICE.SENT', at: invoice.updatedAt });
+      return clone(invoice);
+    } finally {
+      this.pendingSends.delete(id);
     }
-    await this.adapter.sendInvoice(invoice.paypalInvoiceId);
-    invoice.status = 'SENT';
-    invoice.updatedAt = this.clock();
-    invoice.events.push({ type: 'INVOICING.INVOICE.SENT', at: invoice.updatedAt });
-    return clone(invoice);
   }
 
   async remindInvoice(id) {
@@ -676,6 +748,16 @@ class InvoiceStore {
     const eventKey = eventId ? `id:${eventId}` : `type:${eventType}`;
     const duplicate = invoice.events.some((event) => event.eventKey === eventKey || (!eventId && event.type === eventType));
     if (duplicate) return { accepted: true, duplicate: true, invoice: clone(invoice), event: { type: eventType, invoiceId: invoice.id, source, verified, ...(eventId ? { eventId } : {}) } };
+    if (invoice.status === nextStatus || !(INVOICE_TRANSITIONS[invoice.status] || []).includes(nextStatus)) {
+      return {
+        accepted: true,
+        duplicate: invoice.status === nextStatus,
+        ignored: true,
+        stale: invoice.status !== nextStatus,
+        invoice: clone(invoice),
+        event: { type: eventType, invoiceId: invoice.id, source, verified, ...(eventId ? { eventId } : {}) }
+      };
+    }
     invoice.status = nextStatus;
     invoice.updatedAt = this.clock();
     invoice.events.push({ type: eventType, at: invoice.updatedAt, source, verified, eventKey, ...(eventId ? { eventId } : {}) });

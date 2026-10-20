@@ -20,6 +20,25 @@ function errorPayload(error) {
   return payload;
 }
 
+function healthPayload(store) {
+  const adapter = store.adapter?.name || 'unknown';
+  return {
+    status: 'ok',
+    adapter,
+    mode: adapter === 'paypal-sandbox' ? 'sandbox' : adapter === 'mock' ? 'mock' : 'custom',
+    uptime: process.uptime(),
+    capabilities: {
+      parseInvoice: true,
+      invoiceCreation: true,
+      invoiceSending: true,
+      reminders: true,
+      webhookSimulation: true,
+      paypalWebhooks: adapter === 'paypal-sandbox' && typeof store.adapter.verifyWebhookSignature === 'function',
+      aiParsing: Boolean(process.env.OPENAI_API_KEY)
+    }
+  };
+}
+
 function readJson(request) {
   return new Promise((resolve, reject) => {
     let bytes = 0;
@@ -79,11 +98,12 @@ function createApp({ store = new InvoiceStore({ adapter: createPayPalAdapter() }
       if (pathname.startsWith('/api/')) {
         const sendMatch = pathname.match(/^\/api\/invoices\/([A-Za-z0-9_-]{1,80})\/send$/);
         const remindMatch = pathname.match(/^\/api\/invoices\/([A-Za-z0-9_-]{1,80})\/remind$/);
-        const knownRoute = pathname === '/api/state' || pathname === '/api/insights' || pathname === '/api/parse-invoice' || pathname === '/api/invoices' || pathname === '/api/webhooks/simulate' || pathname === '/api/webhooks/paypal' || Boolean(sendMatch) || Boolean(remindMatch);
+        const knownRoute = pathname === '/api/health' || pathname === '/api/state' || pathname === '/api/insights' || pathname === '/api/parse-invoice' || pathname === '/api/invoices' || pathname === '/api/webhooks/simulate' || pathname === '/api/webhooks/paypal' || Boolean(sendMatch) || Boolean(remindMatch);
         if (!knownRoute) return sendJson(response, 404, { error: { code: 'NOT_FOUND', message: 'route not found' } });
+        if (request.method === 'GET' && pathname === '/api/health') return sendJson(response, 200, healthPayload(store));
         if (request.method === 'GET' && pathname === '/api/state') return sendJson(response, 200, store.state());
         if (request.method === 'GET' && pathname === '/api/insights') return sendJson(response, 200, store.insights());
-        if (pathname === '/api/state' || pathname === '/api/insights') {
+        if (pathname === '/api/health' || pathname === '/api/state' || pathname === '/api/insights') {
           response.setHeader('Allow', 'GET');
           return sendJson(response, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed' } });
         }

@@ -57,15 +57,32 @@ test('store creates and sends an invoice through mock PayPal', async () => {
   assert.equal(sent.status, 'SENT');
   assert.equal(sent.paypalInvoiceId, 'MOCK-INV-0001');
   assert.equal(sent.events.at(-1).type, 'INVOICING.INVOICE.SENT');
+  await assert.rejects(() => store.sendInvoice(created.id), /already been sent/);
 });
 
-test('webhook simulation resolves local and PayPal invoice ids', () => {
+test('webhook simulation resolves ids and ignores stale lifecycle events', () => {
   const store = createTestStore();
   const result = store.simulateWebhook({ eventType: 'INVOICING.INVOICE.PAID', invoiceId: 'MOCK-INV-SEED-001' });
   assert.equal(result.accepted, true);
   assert.equal(result.invoice.id, 'inv_seed_001');
   assert.equal(result.invoice.status, 'PAID');
+  const stale = store.simulateWebhook({ id: 'stale-sent-1', eventType: 'INVOICING.INVOICE.SENT', invoiceId: 'inv_seed_001' });
+  assert.equal(stale.accepted, true);
+  assert.equal(stale.stale, true);
+  assert.equal(stale.invoice.status, 'PAID');
   assert.throws(() => store.simulateWebhook({ eventType: 'PAYMENT.SALE.COMPLETED', invoiceId: 'inv_seed_001' }), ValidationError);
+
+  for (const [eventType, status] of [['INVOICING.INVOICE.CANCELLED', 'CANCELLED'], ['INVOICING.INVOICE.VOIDED', 'VOID']]) {
+    const terminalStore = createTestStore();
+    const closed = terminalStore.simulateWebhook({ eventType, invoiceId: 'inv_seed_001' });
+    assert.equal(closed.invoice.status, status);
+    for (const staleEventType of ['INVOICING.INVOICE.SENT', 'INVOICING.INVOICE.PAID', 'INVOICING.INVOICE.CANCELLED', 'INVOICING.INVOICE.VOIDED']) {
+      if (staleEventType === eventType) continue;
+      const outOfOrder = terminalStore.simulateWebhook({ id: `stale-${status}-${staleEventType}`, eventType: staleEventType, invoiceId: 'inv_seed_001' });
+      assert.equal(outOfOrder.stale, true);
+      assert.equal(outOfOrder.invoice.status, status);
+    }
+  }
 });
 
 test('insights explain invoice risk and project due cash across horizons', () => {
@@ -128,6 +145,21 @@ test('configured AI extraction falls back deterministically when the provider fa
   assert.equal(parsed.total, 100);
 });
 
+test('configured AI extraction aborts a hung provider within its timeout', async () => {
+  let signal;
+  const parsed = await parseInvoiceTextAsync('Invoice for Timeout Buyer <timeout@example.com>\n1 audit at $100', {
+    apiKey: 'test-key',
+    timeoutMs: 20,
+    fetchImpl: async (_url, options) => {
+      signal = options.signal;
+      await new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+      return resolve();
+    }
+  });
+  assert.equal(signal.aborted, true);
+  assert.equal(parsed.total, 100);
+});
+
 test('configured AI extraction validates a structured OpenAI-compatible response', async () => {
   const parsed = await parseInvoiceTextAsync('anything', {
     apiKey: 'test-key',
@@ -142,6 +174,22 @@ test('configured AI extraction validates a structured OpenAI-compatible response
   assert.equal(parsed.total, 100);
 });
 
+test('PayPal sandbox requests abort when the provider exceeds its timeout', async () => {
+  let signal;
+  const adapter = new PayPalSandboxAdapter({
+    clientId: 'client',
+    clientSecret: 'secret',
+    timeoutMs: 20,
+    fetchImpl: async (_url, options) => {
+      signal = options.signal;
+      await new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+      return resolve();
+    }
+  });
+  await assert.rejects(() => adapter.accessToken(), (error) => error.code === 'PAYPAL_ERROR' && /timed out/.test(error.message));
+  assert.equal(signal.aborted, true);
+});
+
 test('HTTP routes expose state, parse/create/send/webhook flows and strict errors', async (t) => {
   const server = createApp({ store: createTestStore(), publicDir: 'missing-public', parseInvoice: parseInvoiceText });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -151,6 +199,14 @@ test('HTTP routes expose state, parse/create/send/webhook flows and strict error
   assert.equal(state.status, 200);
   assert.equal(state.body.invoices.length, 2);
   assert.equal(state.body.adapter, 'mock');
+
+  const health = await request(server, 'GET', '/api/health');
+  assert.equal(health.status, 200);
+  assert.equal(health.body.adapter, 'mock');
+  assert.equal(health.body.mode, 'mock');
+  assert.equal(typeof health.body.uptime, 'number');
+  assert.equal(health.body.capabilities.paypalWebhooks, false);
+  assert.equal(Object.prototype.hasOwnProperty.call(health.body, 'PAYPAL_CLIENT_SECRET'), false);
 
   const parsed = await request(server, 'POST', '/api/parse-invoice', { text: 'Invoice for Route Buyer <route@example.com>\n1 design at $100' });
   assert.equal(parsed.status, 200);
