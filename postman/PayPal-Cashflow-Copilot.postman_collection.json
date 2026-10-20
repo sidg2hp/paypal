@@ -1,0 +1,74 @@
+{
+  "info": {
+    "name": "PayPal Cashflow Copilot",
+    "description": "Inspectable sponsor-ready collection for the Cashflow Copilot demo. Use the PayPal Sandbox environment and never commit credentials.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000" },
+    { "key": "invoiceId", "value": "inv_seed_001" },
+    { "key": "paypalInvoiceId", "value": "MOCK-INV-SEED-001" }
+  ],
+  "item": [
+    {
+      "name": "Local app",
+      "item": [
+        {
+          "name": "Get dashboard state",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/state" }
+        },
+        {
+          "name": "Parse invoice intent",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"text\": \"Invoice Acme Design Co <accounts@acme.example> for 2 brand review sessions at $125 each, tax 8%, due in 15 days\"\n}" },
+            "url": "{{baseUrl}}/api/parse-invoice"
+          }
+        },
+        {
+          "name": "Simulate paid webhook",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"eventType\": \"INVOICING.INVOICE.PAID\",\n  \"invoiceId\": \"{{invoiceId}}\"\n}" },
+            "url": "{{baseUrl}}/api/webhooks/simulate"
+          }
+        }
+      ]
+    },
+    {
+      "name": "PayPal Sandbox reference",
+      "item": [
+        {
+          "name": "OAuth token",
+          "request": {
+            "auth": { "type": "basic", "basic": [{ "key": "username", "value": "{{PAYPAL_CLIENT_ID}}", "type": "string" }, { "key": "password", "value": "{{PAYPAL_CLIENT_SECRET}}", "type": "string" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }, { "key": "Accept", "value": "application/json" }],
+            "body": { "mode": "urlencoded", "urlencoded": [{ "key": "grant_type", "value": "client_credentials", "type": "text" }] },
+            "url": "https://api-m.sandbox.paypal.com/v1/oauth2/token"
+          }
+        },
+        {
+          "name": "Create invoice (reference)",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"detail\": {\"invoice_number\": \"COPILOT-DEMO-001\", \"currency_code\": \"USD\"},\n  \"invoicer\": {\"name\": {\"given_name\": \"Cashflow\", \"surname\": \"Copilot\"}},\n  \"primary_recipients\": [{\"billing_info\": {\"email_address\": \"accounts@example.com\"}}],\n  \"items\": [{\"name\": \"Strategy session\", \"quantity\": \"1\", \"unit_amount\": {\"currency_code\": \"USD\", \"value\": \"250.00\"}, \"unit_of_measure\": \"QUANTITY\"}]\n}" },
+            "url": "https://api-m.sandbox.paypal.com/v2/invoicing/invoices"
+          }
+        },
+        {
+          "name": "Send invoice (reference)",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }] },
+            "method": "POST",
+            "url": "https://api-m.sandbox.paypal.com/v2/invoicing/invoices/{{paypalInvoiceId}}/send"
+          }
+        }
+      ]
+    }
+  ]
+}

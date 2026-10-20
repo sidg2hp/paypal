@@ -1,0 +1,16 @@
+{
+  "name": "paypal-cashflow-copilot",
+  "version": "0.1.0",
+  "description": "Offline-first PayPal Cashflow Copilot MVP backend",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test",
+    "check": "node --check src/core.js && node --check src/server.js && node --check tests/core.test.js"
+  },
+  "engines": {
+    "node": ">=22 <23"
+  }
+}

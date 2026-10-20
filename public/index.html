@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#091b2d">
+  <title>Cashflow Copilot — PayPal AI Hackathon</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-lockup">
+        <div class="brand-mark"><span></span><span></span></div>
+        <div><strong>cashflow</strong><small>copilot</small></div>
+      </div>
+      <div class="workspace-switcher"><span class="avatar avatar-blue">JM</span><div><strong>Jules Morgan</strong><small>Independent studio</small></div><span class="chevron">⌄</span></div>
+      <nav class="nav-list" aria-label="Primary navigation">
+        <a class="nav-item active" href="#overview"><span class="nav-icon">◈</span>Overview</a>
+        <a class="nav-item" href="#invoices"><span class="nav-icon">▤</span>Invoices <b class="nav-count">3</b></a>
+        <a class="nav-item" href="#activity"><span class="nav-icon">⌁</span>Activity</a>
+        <a class="nav-item" href="#customers"><span class="nav-icon">♧</span>Customers</a>
+      </nav>
+      <div class="sidebar-divider"></div>
+      <div class="nav-label">Workspace</div>
+      <nav class="nav-list">
+        <a class="nav-item" href="#settings"><span class="nav-icon">⚙</span>Settings</a>
+        <a class="nav-item" href="#help"><span class="nav-icon">?</span>Help center</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="sandbox-badge"><span class="pulse-dot"></span><div><strong>PayPal sandbox</strong><small>Connected · mock mode</small></div><span class="more">•••</span></div>
+        <div class="sidebar-footer"><span>Build 0.1</span><span class="status-dot"></span><span>All systems good</span></div>
+      </div>
+    </aside>
+
+    <main class="main-content" id="overview">
+      <header class="topbar">
+        <div class="breadcrumbs"><span>Workspace</span><span>/</span><strong>Overview</strong></div>
+        <div class="top-actions"><button class="icon-button" aria-label="Notifications">♢<i></i></button><div class="top-avatar">JM</div></div>
+      </header>
+
+      <section class="page-heading">
+        <div><p class="eyebrow">TUESDAY, OCTOBER 20, 2026 <span class="live-chip"><span class="pulse-dot"></span> LIVE DEMO</span></p><h1>Good morning, Jules <span class="wave">✦</span></h1><p class="heading-subtitle">Your money, moving forward. Here's the pulse of your studio.</p></div>
+        <button class="button button-primary" id="open-draft"><span class="button-plus">＋</span> Draft an invoice</button>
+      </section>
+
+      <section class="metric-grid" aria-label="Cashflow summary">
+        <article class="metric-card metric-featured"><div class="metric-top"><span>OUTSTANDING</span><span class="metric-icon">↗</span></div><strong id="metric-outstanding">$575.00</strong><div class="metric-bottom"><span class="trend trend-up">↑ 12.4%</span><span>vs last month</span></div><div class="metric-spark"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article>
+        <article class="metric-card"><div class="metric-top"><span>COLLECTED THIS MONTH</span><span class="metric-icon neutral">◷</span></div><strong id="metric-paid">$250.00</strong><div class="metric-bottom"><span class="trend trend-up">↑ 8.1%</span><span>vs last month</span></div><div class="metric-bar"><span></span></div></article>
+        <article class="metric-card"><div class="metric-top"><span>OPEN INVOICES</span><span class="metric-icon neutral">▤</span></div><strong id="metric-open">2</strong><div class="metric-bottom"><span class="trend trend-warn">1 needs attention</span></div><div class="mini-status"><span class="mini-dot amber"></span><span class="mini-dot blue"></span><span class="mini-dot blue"></span><span class="mini-dot gray"></span></div></article>
+        <article class="metric-card"><div class="metric-top"><span>AVG. TIME TO PAY</span><span class="metric-icon neutral">◴</span></div><strong>4.8 <em>days</em></strong><div class="metric-bottom"><span class="trend trend-up">↓ 1.2 days</span><span>vs last month</span></div><div class="metric-bar purple"><span></span></div></article>
+      </section>
+
+      <section class="workspace-grid">
+        <div class="left-column">
+          <article class="copilot-card" id="copilot">
+            <div class="card-header copilot-header"><div class="copilot-title"><div class="copilot-orb"><span></span><span></span><span></span></div><div><h2>Ask your Copilot</h2><p>Turn a thought into a paid invoice.</p></div></div><span class="ai-label">AI ASSISTED</span></div>
+            <div class="prompt-area"><p class="prompt-label">TRY SAYING</p><button class="suggestion" data-prompt="Invoice Acme Design Co <accounts@acme.example> for 2 brand review sessions at $125 each, tax 8%, due in 15 days">“Invoice Acme for two brand review sessions at $125 each, due in 15 days.”</button><button class="suggestion" data-prompt="Create an invoice for Northwind Studio <billing@northwind.example> for 1 cashflow setup at $450, due 2026-11-30">“Create an invoice for Northwind Studio for a cashflow setup.”</button></div>
+            <div class="command-row"><textarea id="prompt-input" rows="2" placeholder="Tell me what needs to get paid…"></textarea><button class="send-command" id="parse-button" aria-label="Draft invoice">↗</button></div>
+            <div class="trust-row"><span class="lock">⌑</span><span>Copilot prepares. You approve. PayPal processes.</span><span class="learn-more">How it works <span>→</span></span></div>
+          </article>
+
+          <article class="panel-card invoice-panel" id="invoices">
+            <div class="card-header"><div><h2>Recent invoices</h2><p>Keep an eye on what is moving — and what is stuck.</p></div><button class="text-button" id="view-all">View all <span>→</span></button></div>
+            <div class="table-wrap"><table><thead><tr><th>CLIENT</th><th>AMOUNT</th><th>DUE DATE</th><th>STATUS</th><th></th></tr></thead><tbody id="invoice-rows"></tbody></table></div>
+            <div class="table-footer"><span><span class="green-check">✓</span> All payment activity is synced with PayPal</span><span class="adapter-label" id="adapter-label">MOCK ADAPTER</span></div>
+          </article>
+        </div>
+
+        <aside class="right-column">
+          <article class="panel-card attention-card"><div class="card-header compact"><div><h2>Needs your attention</h2><p>One small nudge can unlock your cash.</p></div><span class="attention-count">1</span></div><div class="attention-item"><div class="attention-icon">!</div><div class="attention-copy"><strong>Acme Design Co is waiting</strong><p>$250.00 · sent 12 days ago</p><button class="inline-action" data-remind="inv_seed_002">Send a gentle reminder <span>↗</span></button></div></div></article>
+          <article class="panel-card activity-card" id="activity"><div class="card-header compact"><div><h2>Live activity</h2><p>What your Copilot is seeing.</p></div><span class="live-dot-label"><span class="pulse-dot"></span> LIVE</span></div><div class="activity-list" id="activity-list"></div><button class="activity-button" id="simulate-button"><span>＋</span> Simulate a paid invoice</button></article>
+          <article class="principle-card"><div class="principle-mark">✦</div><div><p class="eyebrow">THE COPILOT PRINCIPLE</p><strong>More automation.<br>More control.</strong><p class="principle-copy">Every financial action is explainable, reviewable, and yours to approve.</p></div></article>
+        </aside>
+      </section>
+      <footer class="page-footer"><span>Cashflow Copilot</span><span>Built for PayPal AI Hackathon · October 2026</span><span><span class="footer-dot"></span> Demo mode</span></footer>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="modal-backdrop" hidden>
+    <section class="draft-modal" role="dialog" aria-modal="true" aria-labelledby="draft-title">
+      <div class="modal-head"><div><p class="eyebrow">COPILOT DRAFT</p><h2 id="draft-title">Review before PayPal</h2><p>AI extracted the details below. You stay in control.</p></div><button class="close-button" id="close-modal" aria-label="Close">×</button></div>
+      <div class="extraction-note"><span class="copilot-orb mini"><span></span><span></span><span></span></span><div><strong>Intent understood</strong><p id="extraction-summary">I found the customer, line items, and payment terms.</p></div><span class="confidence">98% confidence</span></div>
+      <form id="invoice-form">
+        <div class="form-grid"><label>Client name<input name="customerName" required></label><label>Client email<input name="customerEmail" type="email" required></label><label>Due date<input name="dueDate" type="date"></label><label>Tax rate (%)<input name="taxRate" type="number" min="0" max="100" step="0.01"></label></div>
+        <div class="line-items-head"><span>LINE ITEMS</span><button type="button" class="text-button" id="add-item">＋ Add line</button></div><div id="form-items"></div>
+        <div class="form-summary"><div><span>Subtotal</span><strong id="form-subtotal">$0.00</strong></div><div><span>Tax</span><strong id="form-tax">$0.00</strong></div><div class="form-total"><span>Total</span><strong id="form-total">$0.00</strong></div></div>
+        <label class="notes-label">Note to client<textarea name="notes" rows="2" placeholder="Optional context for the client"></textarea></label>
+        <div class="modal-actions"><button type="button" class="button button-quiet" id="cancel-modal">Keep editing</button><button type="submit" class="button button-primary"><span>✓</span> Approve & send with PayPal</button></div>
+      </form>
+    </section>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

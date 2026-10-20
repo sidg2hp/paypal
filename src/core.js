@@ -1,0 +1,475 @@
+'use strict';
+
+const DEFAULT_CURRENCY = 'USD';
+const MAX_BODY_TEXT = 8000;
+
+class ValidationError extends Error {
+  constructor(message, details) {
+    super(message);
+    this.name = 'ValidationError';
+    this.code = 'VALIDATION_ERROR';
+    this.statusCode = 400;
+    if (details) this.details = details;
+  }
+}
+
+class NotFoundError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'NotFoundError';
+    this.code = 'NOT_FOUND';
+    this.statusCode = 404;
+  }
+}
+
+class PayPalError extends Error {
+  constructor(message, statusCode = 502) {
+    super(message);
+    this.name = 'PayPalError';
+    this.code = 'PAYPAL_ERROR';
+    this.statusCode = statusCode >= 400 && statusCode < 600 ? 502 : 502;
+  }
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function roundCents(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function parseAmount(value, field = 'amount') {
+  let number = value;
+  if (typeof value === 'string') {
+    if (!/^\d+(?:\.\d{1,2})?$/.test(value.trim())) {
+      throw new ValidationError(`${field} must be a non-negative amount with at most two decimals`);
+    }
+    number = Number(value);
+  }
+  if (typeof number !== 'number' || !Number.isFinite(number) || number < 0 || number > 1000000000) {
+    throw new ValidationError(`${field} must be a non-negative finite amount`);
+  }
+  return roundCents(number);
+}
+
+function parsePositiveNumber(value, field) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 1000000) {
+    throw new ValidationError(`${field} must be a positive finite number`);
+  }
+  return value;
+}
+
+function validateCurrency(value) {
+  const currency = value === undefined ? DEFAULT_CURRENCY : value;
+  if (typeof currency !== 'string' || !/^[A-Z]{3}$/.test(currency)) {
+    throw new ValidationError('currency must be a three-letter uppercase code');
+  }
+  return currency;
+}
+
+function validateDate(value, field = 'dueDate') {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new ValidationError(`${field} must be an ISO date (YYYY-MM-DD)`);
+  }
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+    throw new ValidationError(`${field} must be a valid ISO date`);
+  }
+  return value;
+}
+
+function validateEmail(value) {
+  if (typeof value !== 'string' || value.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+    throw new ValidationError('customer email must be a valid email address');
+  }
+  return value.toLowerCase();
+}
+
+function calculateTotals(items, taxRate = 0) {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new ValidationError('at least one invoice item is required');
+  }
+  if (typeof taxRate !== 'number' || !Number.isFinite(taxRate) || taxRate < 0 || taxRate > 100) {
+    throw new ValidationError('taxRate must be between 0 and 100');
+  }
+  const normalizedItems = items.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new ValidationError(`items[${index}] must be an object`);
+    }
+    const description = item.description;
+    if (typeof description !== 'string' || description.trim().length === 0 || description.length > 500) {
+      throw new ValidationError(`items[${index}].description is required`);
+    }
+    const quantity = parsePositiveNumber(item.quantity, `items[${index}].quantity`);
+    const unitPrice = parseAmount(item.unitPrice ?? item.unit_price, `items[${index}].unitPrice`);
+    const amount = roundCents(quantity * unitPrice);
+    return { description: description.trim(), quantity, unitPrice, amount };
+  });
+  const subtotal = roundCents(normalizedItems.reduce((sum, item) => sum + item.amount, 0));
+  const tax = roundCents(subtotal * (taxRate / 100));
+  return { items: normalizedItems, subtotal, taxRate, tax, total: roundCents(subtotal + tax) };
+}
+
+function extractCurrency(text) {
+  const explicit = text.match(/\b(?:currency\s*[:=]?\s*)?(USD|EUR|GBP|CAD|AUD|JPY)\b/i);
+  if (explicit) return explicit[1].toUpperCase();
+  if (text.includes('€')) return 'EUR';
+  if (text.includes('£')) return 'GBP';
+  if (text.includes('¥')) return 'JPY';
+  return DEFAULT_CURRENCY;
+}
+
+function extractCustomer(text) {
+  const emailMatch = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  const email = emailMatch ? emailMatch[0].toLowerCase() : null;
+  let name = null;
+  const patterns = [
+    /(?:invoice|bill)\s+(?:for|to)\s+([^\n,;<(]+?)(?:\s*<[^>]+>|\s+\S+@\S+)?(?:[,;\n]|$)/i,
+    /(?:customer|client|recipient)\s*[:=-]\s*([^\n,;<(]+?)(?:\s*<[^>]+>|\s+\S+@\S+)?(?:[,;\n]|$)/i,
+    /(?:to)\s*[:=-]\s*([^\n,;<(]+?)(?:\s*<[^>]+>|\s+\S+@\S+)?(?:[,;\n]|$)/i
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      name = match[1].trim().replace(/\s+(?:email|e-mail)\s*$/i, '').trim();
+      break;
+    }
+  }
+  if (!name && email) {
+    name = email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  }
+  return { name: name || 'Customer', email };
+}
+
+function parseDueDate(text) {
+  const absolute = text.match(/(?:due|pay(?:able)?\s+by)\s*(?:date)?\s*[:=]?\s*(\d{4}-\d{2}-\d{2})/i);
+  if (absolute) return validateDate(absolute[1]);
+  const relative = text.match(/due\s+in\s+(\d{1,3})\s+days?/i);
+  if (relative) {
+    const due = new Date('2026-01-01T00:00:00.000Z');
+    due.setUTCDate(due.getUTCDate() + Number(relative[1]));
+    return due.toISOString().slice(0, 10);
+  }
+  return null;
+}
+
+function parseItems(text) {
+  const items = [];
+  const lines = text.split(/[\n\r]+/).map((line) => line.trim()).filter(Boolean);
+  const candidates = lines.length > 1 ? lines : text.split(/\s*(?:;|,(?=\s*\d)|\s+and\s+(?=\d))/i).map((part) => part.trim()).filter(Boolean);
+  for (const candidate of candidates) {
+    if (/^(?:invoice|bill|customer|client|recipient|email|tax|currency|due|notes?)[\s:=-]/i.test(candidate)) continue;
+    let match = candidate.match(/^[-*]?\s*(\d+(?:\.\d+)?)\s*(?:x|×|units?\s+of)?\s+(.+?)\s+(?:at|@|x|each\s+at)\s*[$€£¥]?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:each|per\s+(?:hour|unit)|\/\s*(?:hour|unit))?\s*$/i);
+    if (!match) {
+      match = candidate.match(/^[-*]?\s*(.+?)\s*[-:]\s*(\d+(?:\.\d+)?)\s*(?:x\s*)?[$€£¥]?\s*([\d,]+(?:\.\d{1,2})?)\s*$/i);
+      if (match) match = [match[0], match[2], match[1], match[3]];
+    }
+    if (!match) {
+      match = candidate.match(/^[-*]?\s*(\d+(?:\.\d+)?)\s+(.+?)\s+[$€£¥]?\s*([\d,]+(?:\.\d{1,2})?)\s*$/i);
+    }
+    if (match) {
+      const quantity = Number(match[1]);
+      const description = match[2].replace(/[,.]$/, '').replace(/^(?:hours?|hrs?|units?|items?)\s+(?:of\s+)?/i, '').trim();
+      const unitPrice = Number(match[3].replace(/,/g, ''));
+      if (description && Number.isFinite(quantity) && Number.isFinite(unitPrice)) items.push({ description, quantity, unitPrice });
+    }
+  }
+  if (items.length === 0) {
+    const fallback = text.match(/(?:for|of)\s+(.+?)\s+(?:at|for)\s*[$€£¥]?\s*([\d,]+(?:\.\d{1,2})?)/i);
+    if (fallback) items.push({ description: fallback[1].replace(/[,.]$/, '').replace(/^(?:hours?|hrs?|units?|items?)\s+(?:of\s+)?/i, '').trim(), quantity: 1, unitPrice: Number(fallback[2].replace(/,/g, '')) });
+  }
+  return items;
+}
+
+function parseInvoiceText(input, { openAIHook } = {}) {
+  // Optional OpenAI-compatible seam: the app never performs a network call by
+  // itself. An integrator can inject a parser when OPENAI_API_KEY is present;
+  // otherwise this deterministic parser is always used.
+  if (process.env.OPENAI_API_KEY && typeof openAIHook === 'function') return openAIHook(input);
+  if (typeof input !== 'string' || input.trim().length < 3 || input.length > MAX_BODY_TEXT) {
+    throw new ValidationError(`text must be between 3 and ${MAX_BODY_TEXT} characters`);
+  }
+  const text = input.trim();
+  const customer = extractCustomer(text);
+  const items = parseItems(text);
+  if (items.length === 0) throw new ValidationError('could not find an invoice item; include quantity, description, and price');
+  const taxMatch = text.match(/(?:sales\s+)?tax\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%/i);
+  const taxRate = taxMatch ? Number(taxMatch[1]) : 0;
+  const totals = calculateTotals(items, taxRate);
+  const notesMatch = text.match(/notes?\s*[:=-]\s*(.+)$/im);
+  return {
+    customer: { name: customer.name, ...(customer.email ? { email: customer.email } : {}) },
+    currency: extractCurrency(text),
+    dueDate: parseDueDate(text),
+    ...(notesMatch ? { notes: notesMatch[1].trim() } : {}),
+    ...totals
+  };
+}
+
+function normalizeInvoiceInput(input, id, now) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ValidationError('invoice body must be an object');
+  // Parsed invoice responses include calculated fields so they can be submitted
+  // directly to this endpoint. Recalculate them below instead of trusting them.
+  const allowed = new Set(['customer', 'customerName', 'customerEmail', 'currency', 'dueDate', 'due_date', 'items', 'taxRate', 'tax_rate', 'notes', 'reference', 'subtotal', 'tax', 'total']);
+  const unknown = Object.keys(input).filter((key) => !allowed.has(key));
+  if (unknown.length) throw new ValidationError(`unknown invoice field: ${unknown[0]}`);
+  const customerInput = input.customer || {};
+  if (typeof customerInput !== 'object' || Array.isArray(customerInput)) throw new ValidationError('customer must be an object');
+  const name = input.customerName ?? customerInput.name;
+  if (typeof name !== 'string' || name.trim().length < 1 || name.length > 200) throw new ValidationError('customer name is required');
+  const email = validateEmail(input.customerEmail ?? customerInput.email);
+  const currency = validateCurrency(input.currency);
+  const dueDate = validateDate(input.dueDate ?? input.due_date);
+  const taxRate = input.taxRate ?? input.tax_rate ?? 0;
+  const totals = calculateTotals(input.items, taxRate);
+  if (input.notes !== undefined && (typeof input.notes !== 'string' || input.notes.length > 2000)) throw new ValidationError('notes must be a string up to 2000 characters');
+  if (input.reference !== undefined && (typeof input.reference !== 'string' || input.reference.length > 120)) throw new ValidationError('reference must be a string up to 120 characters');
+  return {
+    id,
+    customer: { name: name.trim(), email },
+    currency,
+    dueDate,
+    items: totals.items,
+    subtotal: totals.subtotal,
+    taxRate: totals.taxRate,
+    tax: totals.tax,
+    total: totals.total,
+    notes: input.notes?.trim() || null,
+    reference: input.reference?.trim() || null,
+    status: 'DRAFT',
+    paypalInvoiceId: null,
+    createdAt: now,
+    updatedAt: now,
+    events: []
+  };
+}
+
+function seedInvoice(data) {
+  const totals = calculateTotals(data.items, data.taxRate || 0);
+  return {
+    id: data.id,
+    customer: data.customer,
+    currency: data.currency || DEFAULT_CURRENCY,
+    dueDate: data.dueDate || null,
+    items: totals.items,
+    subtotal: totals.subtotal,
+    taxRate: totals.taxRate,
+    tax: totals.tax,
+    total: totals.total,
+    notes: data.notes || null,
+    reference: data.reference || null,
+    status: data.status || 'DRAFT',
+    paypalInvoiceId: data.paypalInvoiceId || null,
+    createdAt: data.createdAt,
+    updatedAt: data.updatedAt,
+    events: data.events || []
+  };
+}
+
+const SEEDED_INVOICES = [
+  seedInvoice({
+    id: 'inv_seed_001',
+    customer: { name: 'Northwind Studio', email: 'billing@northwind.example' },
+    currency: 'USD',
+    dueDate: '2026-11-15',
+    items: [{ description: 'Cashflow setup', quantity: 1, unitPrice: 450 }],
+    taxRate: 8.25,
+    status: 'SENT',
+    paypalInvoiceId: 'MOCK-INV-SEED-001',
+    createdAt: '2026-10-01T09:00:00.000Z',
+    updatedAt: '2026-10-01T09:00:00.000Z',
+    events: [{ type: 'INVOICING.INVOICE.SENT', at: '2026-10-01T09:00:00.000Z' }]
+  }),
+  seedInvoice({
+    id: 'inv_seed_002',
+    customer: { name: 'Acme Design Co', email: 'accounts@acme.example' },
+    currency: 'USD',
+    items: [{ description: 'Brand review', quantity: 2, unitPrice: 125 }],
+    taxRate: 0,
+    status: 'PAID',
+    paypalInvoiceId: 'MOCK-INV-SEED-002',
+    createdAt: '2026-09-15T09:00:00.000Z',
+    updatedAt: '2026-09-20T09:00:00.000Z',
+    events: [{ type: 'INVOICING.INVOICE.PAID', at: '2026-09-20T09:00:00.000Z' }]
+  })
+];
+
+class MockPayPalAdapter {
+  constructor() {
+    this.name = 'mock';
+    this.sequence = 1;
+  }
+
+  async createInvoice(invoice) {
+    const id = `MOCK-INV-${String(this.sequence++).padStart(4, '0')}`;
+    return { id, status: 'DRAFT', href: `/mock/paypal/invoices/${id}` };
+  }
+
+  async sendInvoice(paypalInvoiceId) {
+    return { id: paypalInvoiceId, status: 'SENT' };
+  }
+}
+
+class PayPalSandboxAdapter {
+  constructor({ clientId, clientSecret, fetchImpl = globalThis.fetch, baseUrl = 'https://api-m.sandbox.paypal.com' } = {}) {
+    if (!clientId || !clientSecret) throw new Error('PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET are required together');
+    if (typeof fetchImpl !== 'function') throw new Error('fetch is required for the PayPal sandbox adapter');
+    this.name = 'paypal-sandbox';
+    this.clientId = clientId;
+    this.clientSecret = clientSecret;
+    this.fetch = fetchImpl;
+    this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.token = null;
+  }
+
+  async accessToken() {
+    if (this.token && this.token.expiresAt > Date.now() + 30000) return this.token.value;
+    const response = await this.fetch(`${this.baseUrl}/v1/oauth2/token`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64')}`,
+        Accept: 'application/json',
+        'Accept-Language': 'en_US',
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: 'grant_type=client_credentials'
+    });
+    const body = await safeJson(response);
+    if (!response.ok || !body?.access_token) throw new PayPalError('PayPal authentication failed');
+    this.token = { value: body.access_token, expiresAt: Date.now() + Number(body.expires_in || 300) * 1000 };
+    return this.token.value;
+  }
+
+  async request(path, options = {}) {
+    const token = await this.accessToken();
+    const response = await this.fetch(`${this.baseUrl}${path}`, {
+      ...options,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(options.headers || {}) }
+    });
+    const body = await safeJson(response);
+    if (!response.ok) throw new PayPalError(`PayPal request failed (${response.status})`);
+    return body;
+  }
+
+  async createInvoice(invoice) {
+    const payload = {
+      detail: {
+        invoice_number: invoice.id,
+        reference: invoice.reference || invoice.id,
+        currency_code: invoice.currency,
+        note: invoice.notes || undefined,
+        payment_term: invoice.dueDate ? { term_type: 'DUE_ON_DATE_SPECIFIED', due_date: invoice.dueDate } : undefined
+      },
+      invoicer: { name: { given_name: 'Cashflow', surname: 'Copilot' } },
+      primary_recipients: [{ billing_info: { name: { full_name: invoice.customer.name }, email_address: invoice.customer.email } }],
+      items: invoice.items.map((item) => ({ name: item.description, quantity: String(item.quantity), unit_amount: { currency_code: invoice.currency, value: item.unitPrice.toFixed(2) }, unit_of_measure: 'QUANTITY' }))
+    };
+    return this.request('/v2/invoicing/invoices', { method: 'POST', body: JSON.stringify(payload) });
+  }
+
+  async sendInvoice(paypalInvoiceId) {
+    await this.request(`/v2/invoicing/invoices/${encodeURIComponent(paypalInvoiceId)}/send`, { method: 'POST', body: JSON.stringify({}) });
+    return { id: paypalInvoiceId, status: 'SENT' };
+  }
+}
+
+async function safeJson(response) {
+  try { return await response.json(); } catch { return null; }
+}
+
+function createPayPalAdapter(env = process.env, options = {}) {
+  const hasId = Boolean(env.PAYPAL_CLIENT_ID);
+  const hasSecret = Boolean(env.PAYPAL_CLIENT_SECRET);
+  if (!hasId && !hasSecret) return new MockPayPalAdapter();
+  if (!hasId || !hasSecret) throw new Error('PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET must both be configured');
+  return new PayPalSandboxAdapter({ clientId: env.PAYPAL_CLIENT_ID, clientSecret: env.PAYPAL_CLIENT_SECRET, ...options });
+}
+
+class InvoiceStore {
+  constructor({ adapter = createPayPalAdapter(), clock = () => new Date().toISOString(), seed = SEEDED_INVOICES } = {}) {
+    this.adapter = adapter;
+    this.clock = clock;
+    this.invoices = new Map(seed.map((invoice) => [invoice.id, clone(invoice)]));
+    this.sequence = 1;
+  }
+
+  listInvoices() { return clone([...this.invoices.values()]); }
+
+  getInvoice(id) {
+    const invoice = this.invoices.get(id);
+    if (!invoice) throw new NotFoundError(`invoice ${id} was not found`);
+    return invoice;
+  }
+
+  state() {
+    const invoices = this.listInvoices();
+    const byStatus = {};
+    const outstanding = {};
+    const paid = {};
+    for (const invoice of invoices) {
+      byStatus[invoice.status] = (byStatus[invoice.status] || 0) + 1;
+      if (invoice.status === 'PAID') paid[invoice.currency] = roundCents((paid[invoice.currency] || 0) + invoice.total);
+      else if (!['CANCELLED', 'VOID'].includes(invoice.status)) outstanding[invoice.currency] = roundCents((outstanding[invoice.currency] || 0) + invoice.total);
+    }
+    return { invoices, summary: { invoiceCount: invoices.length, byStatus, outstanding, paid, totalOutstanding: outstanding.USD || 0, totalPaid: paid.USD || 0 }, adapter: this.adapter.name };
+  }
+
+  createInvoice(input) {
+    const id = `inv_${String(this.sequence++).padStart(5, '0')}`;
+    const now = this.clock();
+    const invoice = normalizeInvoiceInput(input, id, now);
+    this.invoices.set(id, invoice);
+    return clone(invoice);
+  }
+
+  async sendInvoice(id) {
+    const invoice = this.getInvoice(id);
+    if (invoice.status === 'PAID') throw new ValidationError('a paid invoice cannot be sent');
+    if (invoice.status === 'CANCELLED' || invoice.status === 'VOID') throw new ValidationError(`a ${invoice.status.toLowerCase()} invoice cannot be sent`);
+    if (!invoice.paypalInvoiceId) {
+      const remote = await this.adapter.createInvoice(invoice);
+      if (!remote?.id) throw new PayPalError('PayPal did not return an invoice id');
+      invoice.paypalInvoiceId = remote.id;
+    }
+    await this.adapter.sendInvoice(invoice.paypalInvoiceId);
+    invoice.status = 'SENT';
+    invoice.updatedAt = this.clock();
+    invoice.events.push({ type: 'INVOICING.INVOICE.SENT', at: invoice.updatedAt });
+    return clone(invoice);
+  }
+
+  simulateWebhook(input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ValidationError('webhook body must be an object');
+    const eventType = input.eventType ?? input.event_type;
+    const resource = input.resource && typeof input.resource === 'object' ? input.resource : {};
+    const invoiceId = input.invoiceId ?? input.invoice_id ?? resource.invoice_id ?? resource.id ?? resource.invoice?.id;
+    const allowed = new Set(['INVOICING.INVOICE.SENT', 'INVOICING.INVOICE.PAID', 'INVOICING.INVOICE.CANCELLED', 'INVOICING.INVOICE.VOIDED']);
+    if (typeof eventType !== 'string' || !allowed.has(eventType)) throw new ValidationError('eventType must be a supported invoice webhook event');
+    if (typeof invoiceId !== 'string' || !invoiceId) throw new ValidationError('invoiceId is required');
+    let invoice = this.invoices.get(invoiceId);
+    if (!invoice) invoice = [...this.invoices.values()].find((candidate) => candidate.paypalInvoiceId === invoiceId);
+    if (!invoice) throw new NotFoundError(`invoice ${invoiceId} was not found`);
+    const nextStatus = eventType.endsWith('.PAID') ? 'PAID' : eventType.endsWith('.SENT') ? 'SENT' : eventType.endsWith('.VOIDED') ? 'VOID' : 'CANCELLED';
+    invoice.status = nextStatus;
+    invoice.updatedAt = this.clock();
+    invoice.events.push({ type: eventType, at: invoice.updatedAt });
+    return { accepted: true, invoice: clone(invoice), event: { type: eventType, invoiceId: invoice.id } };
+  }
+}
+
+module.exports = {
+  DEFAULT_CURRENCY,
+  InvoiceStore,
+  MockPayPalAdapter,
+  NotFoundError,
+  PayPalError,
+  PayPalSandboxAdapter,
+  SEEDED_INVOICES,
+  ValidationError,
+  calculateTotals,
+  createPayPalAdapter,
+  normalizeInvoiceInput,
+  parseInvoiceText
+};
