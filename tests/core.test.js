@@ -4,17 +4,17 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const { createApp } = require('../src/server');
-const { InvoiceStore, MockPayPalAdapter, ValidationError, calculateTotals, parseInvoiceText } = require('../src/core');
+const { InvoiceStore, MockPayPalAdapter, PayPalSandboxAdapter, ValidationError, calculateTotals, parseInvoiceText, parseInvoiceTextAsync } = require('../src/core');
 
 function createTestStore() {
   return new InvoiceStore({ adapter: new MockPayPalAdapter(), clock: () => '2026-10-20T12:00:00.000Z' });
 }
 
-function request(server, method, pathname, body) {
+function request(server, method, pathname, body, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const address = server.address();
     const payload = body === undefined ? null : JSON.stringify(body);
-    const req = http.request({ hostname: '127.0.0.1', port: address.port, path: pathname, method, headers: payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {} }, (res) => {
+    const req = http.request({ hostname: '127.0.0.1', port: address.port, path: pathname, method, headers: { ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}), ...extraHeaders } }, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
       res.on('end', () => {
@@ -68,8 +68,82 @@ test('webhook simulation resolves local and PayPal invoice ids', () => {
   assert.throws(() => store.simulateWebhook({ eventType: 'PAYMENT.SALE.COMPLETED', invoiceId: 'inv_seed_001' }), ValidationError);
 });
 
+test('insights explain invoice risk and project due cash across horizons', () => {
+  const store = createTestStore();
+  const insights = store.insights();
+  const overdue = insights.invoices.find((item) => item.invoiceId === 'inv_seed_002');
+  assert.equal(overdue.status, 'SENT');
+  assert.equal(overdue.risk, 'HIGH');
+  assert.equal(overdue.urgency, 'HIGH');
+  assert.equal(overdue.nextAction.type, 'REMIND_INVOICE');
+  assert.ok(overdue.reasonCodes.includes('OVERDUE'));
+  assert.equal(insights.projectedCashPosition['7'].USD, 250);
+  assert.equal(insights.projectedCashPosition['14'].USD, 250);
+  assert.equal(insights.projectedCashPosition['30'].USD, 737.13);
+  assert.equal(insights.nextAction.invoiceId, 'inv_seed_002');
+});
+
+test('mock reminder sends through adapter and records a timeline event', async () => {
+  const adapter = new MockPayPalAdapter();
+  const store = new InvoiceStore({ adapter, clock: () => '2026-10-20T12:00:00.000Z' });
+  const invoice = await store.remindInvoice('inv_seed_002');
+  assert.equal(invoice.reminderCount, 1);
+  assert.deepEqual(adapter.reminders, ['MOCK-INV-SEED-002']);
+  assert.equal(invoice.events.at(-1).type, 'INVOICING.INVOICE.REMINDER_SENT');
+  const draft = store.createInvoice({ customer: { name: 'Draft Buyer', email: 'draft@example.com' }, items: [{ description: 'Draft work', quantity: 1, unitPrice: 10 }] });
+  await assert.rejects(() => store.remindInvoice(draft.id), ValidationError);
+});
+
+test('sandbox reminder and webhook verification use the documented PayPal endpoints', async () => {
+  const calls = [];
+  const adapter = new PayPalSandboxAdapter({ clientId: 'client', clientSecret: 'secret', baseUrl: 'https://sandbox.test', fetchImpl: async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => (url.endsWith('/token') ? { access_token: 'token', expires_in: 300 } : url.endsWith('/verify-webhook-signature') ? { verification_status: 'SUCCESS' } : {}) };
+  } });
+  const result = await adapter.remindInvoice('remote-1');
+  assert.equal(result.reminded, true);
+  assert.equal(calls.at(-1).url, 'https://sandbox.test/v2/invoicing/invoices/remote-1/remind');
+  assert.equal(calls.at(-1).options.method, 'POST');
+  assert.equal(await adapter.verifyWebhookSignature({ transmissionId: 't1', transmissionTime: 'now', certUrl: 'https://cert', authAlgo: 'SHA256withRSA', transmissionSig: 'sig', webhookId: 'wh_1', webhookEvent: { id: 'evt_1' } }), true);
+  assert.equal(calls.at(-1).url, 'https://sandbox.test/v1/notifications/verify-webhook-signature');
+});
+
+test('webhook simulation is idempotent for repeated event ids', () => {
+  const store = createTestStore();
+  const first = store.simulateWebhook({ id: 'evt_paid_1', eventType: 'INVOICING.INVOICE.PAID', invoiceId: 'inv_seed_001' });
+  const second = store.simulateWebhook({ id: 'evt_paid_1', eventType: 'INVOICING.INVOICE.PAID', invoiceId: 'inv_seed_001' });
+  assert.equal(first.duplicate, false);
+  assert.equal(second.duplicate, true);
+  assert.equal(second.invoice.events.filter((event) => event.type === 'INVOICING.INVOICE.PAID').length, 1);
+});
+
+test('configured AI extraction falls back deterministically when the provider fails', async () => {
+  let requested = false;
+  const parsed = await parseInvoiceTextAsync('Invoice for Fallback Buyer <fallback@example.com>\n1 audit at $100', {
+    apiKey: 'test-key',
+    fetchImpl: async () => { requested = true; throw new Error('offline'); }
+  });
+  assert.equal(requested, true);
+  assert.equal(parsed.customer.email, 'fallback@example.com');
+  assert.equal(parsed.total, 100);
+});
+
+test('configured AI extraction validates a structured OpenAI-compatible response', async () => {
+  const parsed = await parseInvoiceTextAsync('anything', {
+    apiKey: 'test-key',
+    fetchImpl: async (url, options) => {
+      assert.equal(url, 'https://provider.test/v1/chat/completions');
+      assert.match(options.headers.Authorization, /^Bearer test-key$/);
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({ customer: { name: 'AI Buyer', email: 'ai@example.com' }, items: [{ description: 'Review', quantity: 2, unitPrice: 50 }], currency: 'USD', taxRate: 0, dueDate: null }) } }] }) };
+    },
+    baseUrl: 'https://provider.test/v1'
+  });
+  assert.equal(parsed.customer.name, 'AI Buyer');
+  assert.equal(parsed.total, 100);
+});
+
 test('HTTP routes expose state, parse/create/send/webhook flows and strict errors', async (t) => {
-  const server = createApp({ store: createTestStore(), publicDir: 'missing-public' });
+  const server = createApp({ store: createTestStore(), publicDir: 'missing-public', parseInvoice: parseInvoiceText });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
 
@@ -87,6 +161,14 @@ test('HTTP routes expose state, parse/create/send/webhook flows and strict error
   assert.equal(sent.status, 200);
   assert.equal(sent.body.invoice.status, 'SENT');
 
+  const insights = await request(server, 'GET', '/api/insights');
+  assert.equal(insights.status, 200);
+  assert.ok(insights.body.invoices.some((item) => item.invoiceId === id));
+
+  const reminder = await request(server, 'POST', `/api/invoices/${id}/remind`, {});
+  assert.equal(reminder.status, 200);
+  assert.equal(reminder.body.invoice.reminderCount, 1);
+
   const webhook = await request(server, 'POST', '/api/webhooks/simulate', { eventType: 'INVOICING.INVOICE.PAID', invoiceId: id });
   assert.equal(webhook.status, 200);
   assert.equal(webhook.body.invoice.status, 'PAID');
@@ -95,4 +177,35 @@ test('HTTP routes expose state, parse/create/send/webhook flows and strict error
   assert.equal(bad.body.error.code, 'VALIDATION_ERROR');
   const missing = await request(server, 'GET', '/api/nope');
   assert.equal(missing.status, 404);
+  const unverified = await request(server, 'POST', '/api/webhooks/paypal', { id: 'evt_1', event_type: 'INVOICING.INVOICE.PAID', resource: { invoice_id: id } });
+  assert.equal(unverified.status, 400);
+  assert.match(unverified.body.error.message, /sandbox adapter/);
+});
+
+test('verified PayPal webhook route gates state changes on signature verification', async (t) => {
+  const store = createTestStore();
+  let verificationInput;
+  store.adapter = {
+    name: 'paypal-sandbox',
+    verifyWebhookSignature: async (input) => { verificationInput = input; return true; }
+  };
+  const previousWebhookId = process.env.PAYPAL_WEBHOOK_ID;
+  process.env.PAYPAL_WEBHOOK_ID = 'WH-DEMO-1';
+  const server = createApp({ store, publicDir: 'missing-public', parseInvoice: parseInvoiceText });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.close(); if (previousWebhookId === undefined) delete process.env.PAYPAL_WEBHOOK_ID; else process.env.PAYPAL_WEBHOOK_ID = previousWebhookId; });
+
+  const event = { id: 'evt_verified_1', event_type: 'INVOICING.INVOICE.PAID', resource: { invoice_id: 'inv_seed_001' } };
+  const result = await request(server, 'POST', '/api/webhooks/paypal', event, {
+    'paypal-transmission-id': 'transmission-1',
+    'paypal-transmission-time': '2026-10-20T12:00:00Z',
+    'paypal-cert-url': 'https://api-m.sandbox.paypal.com/cert',
+    'paypal-auth-algo': 'SHA256withRSA',
+    'paypal-transmission-sig': 'signature-1'
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.event.verified, true);
+  assert.equal(result.body.invoice.status, 'PAID');
+  assert.equal(verificationInput.webhookId, 'WH-DEMO-1');
+  assert.equal(verificationInput.webhookEvent.id, 'evt_verified_1');
 });

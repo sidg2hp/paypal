@@ -31,6 +31,15 @@ class PayPalError extends Error {
   }
 }
 
+class AuthorizationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'AuthorizationError';
+    this.code = 'UNAUTHORIZED';
+    this.statusCode = 401;
+  }
+}
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -185,9 +194,9 @@ function parseItems(text) {
 }
 
 function parseInvoiceText(input, { openAIHook, now = new Date() } = {}) {
-  // Optional OpenAI-compatible seam: the app never performs a network call by
-  // itself. An integrator can inject a parser when OPENAI_API_KEY is present;
-  // otherwise this deterministic parser is always used.
+  // Keep this synchronous deterministic path available for offline callers.
+  // The HTTP app uses parseInvoiceTextAsync so an optional AI extractor can be
+  // used without changing the deterministic fallback.
   if (process.env.OPENAI_API_KEY && typeof openAIHook === 'function') return openAIHook(input);
   if (typeof input !== 'string' || input.trim().length < 3 || input.length > MAX_BODY_TEXT) {
     throw new ValidationError(`text must be between 3 and ${MAX_BODY_TEXT} characters`);
@@ -207,6 +216,65 @@ function parseInvoiceText(input, { openAIHook, now = new Date() } = {}) {
     ...(notesMatch ? { notes: notesMatch[1].trim() } : {}),
     ...totals
   };
+}
+
+function normalizeAiExtraction(value, now = new Date()) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ValidationError('AI extraction must be an object');
+  const customer = value.customer && typeof value.customer === 'object' ? value.customer : {};
+  const name = typeof customer.name === 'string' && customer.name.trim() ? customer.name.trim() : 'Customer';
+  const email = customer.email === undefined || customer.email === null || customer.email === '' ? undefined : validateEmail(customer.email);
+  const currency = validateCurrency(value.currency);
+  const dueDate = validateDate(value.dueDate ?? value.due_date);
+  const totals = calculateTotals(value.items, value.taxRate ?? value.tax_rate ?? 0);
+  if (value.notes !== undefined && (typeof value.notes !== 'string' || value.notes.length > 2000)) throw new ValidationError('notes must be a string up to 2000 characters');
+  return {
+    customer: { name, ...(email ? { email } : {}) },
+    currency,
+    dueDate,
+    ...(value.notes ? { notes: value.notes.trim() } : {}),
+    ...totals
+  };
+}
+
+function parseAiJson(content) {
+  if (typeof content !== 'string') throw new Error('AI response did not contain text');
+  const withoutFence = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  return JSON.parse(withoutFence);
+}
+
+async function parseInvoiceTextAsync(input, {
+  apiKey = process.env.OPENAI_API_KEY,
+  fetchImpl = globalThis.fetch,
+  baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+  model = process.env.OPENAI_MODEL || 'gpt-4o-mini',
+  now = new Date()
+} = {}) {
+  if (!apiKey) return parseInvoiceText(input, { now });
+  if (typeof fetchImpl !== 'function') return parseInvoiceText(input, { now });
+  try {
+    if (typeof input !== 'string' || input.trim().length < 3 || input.length > MAX_BODY_TEXT) throw new ValidationError(`text must be between 3 and ${MAX_BODY_TEXT} characters`);
+    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: 'Extract an invoice into JSON only. Return customer {name,email}, currency, dueDate (YYYY-MM-DD or null), items [{description,quantity,unitPrice}], taxRate, and optional notes. Do not invent missing values.' },
+          { role: 'user', content: input.trim() }
+        ]
+      })
+    });
+    const body = await safeJson(response);
+    if (!response.ok) throw new Error(`AI extraction failed (${response.status})`);
+    const content = body?.choices?.[0]?.message?.content;
+    return normalizeAiExtraction(parseAiJson(content), now);
+  } catch (error) {
+    // AI is an enhancement, never a dependency. Deliberately do not log the
+    // error because provider responses can contain prompts or sensitive data.
+    if (error instanceof ValidationError && /^text must be/.test(error.message)) throw error;
+    return parseInvoiceText(input, { now });
+  }
 }
 
 function normalizeInvoiceInput(input, id, now) {
@@ -241,6 +309,7 @@ function normalizeInvoiceInput(input, id, now) {
     reference: input.reference?.trim() || null,
     status: 'DRAFT',
     paypalInvoiceId: null,
+    reminderCount: 0,
     createdAt: now,
     updatedAt: now,
     events: []
@@ -263,6 +332,7 @@ function seedInvoice(data) {
     reference: data.reference || null,
     status: data.status || 'DRAFT',
     paypalInvoiceId: data.paypalInvoiceId || null,
+    reminderCount: data.reminderCount || 0,
     createdAt: data.createdAt,
     updatedAt: data.updatedAt,
     events: data.events || []
@@ -287,13 +357,14 @@ const SEEDED_INVOICES = [
     id: 'inv_seed_002',
     customer: { name: 'Acme Design Co', email: 'accounts@acme.example' },
     currency: 'USD',
+    dueDate: '2026-10-18',
     items: [{ description: 'Brand review', quantity: 2, unitPrice: 125 }],
     taxRate: 0,
-    status: 'PAID',
+    status: 'SENT',
     paypalInvoiceId: 'MOCK-INV-SEED-002',
     createdAt: '2026-09-15T09:00:00.000Z',
-    updatedAt: '2026-09-20T09:00:00.000Z',
-    events: [{ type: 'INVOICING.INVOICE.PAID', at: '2026-09-20T09:00:00.000Z' }]
+    updatedAt: '2026-10-08T09:00:00.000Z',
+    events: [{ type: 'INVOICING.INVOICE.SENT', at: '2026-10-08T09:00:00.000Z' }]
   })
 ];
 
@@ -301,6 +372,7 @@ class MockPayPalAdapter {
   constructor() {
     this.name = 'mock';
     this.sequence = 1;
+    this.reminders = [];
   }
 
   async createInvoice(invoice) {
@@ -310,6 +382,11 @@ class MockPayPalAdapter {
 
   async sendInvoice(paypalInvoiceId) {
     return { id: paypalInvoiceId, status: 'SENT' };
+  }
+
+  async remindInvoice(paypalInvoiceId) {
+    this.reminders.push(paypalInvoiceId);
+    return { id: paypalInvoiceId, status: 'SENT', reminded: true };
   }
 }
 
@@ -374,10 +451,137 @@ class PayPalSandboxAdapter {
     await this.request(`/v2/invoicing/invoices/${encodeURIComponent(paypalInvoiceId)}/send`, { method: 'POST', body: JSON.stringify({}) });
     return { id: paypalInvoiceId, status: 'SENT' };
   }
+
+  async remindInvoice(paypalInvoiceId) {
+    await this.request(`/v2/invoicing/invoices/${encodeURIComponent(paypalInvoiceId)}/remind`, { method: 'POST', body: JSON.stringify({}) });
+    return { id: paypalInvoiceId, status: 'SENT', reminded: true };
+  }
+
+  async verifyWebhookSignature({ transmissionId, transmissionTime, certUrl, authAlgo, transmissionSig, webhookId, webhookEvent }) {
+    const body = await this.request('/v1/notifications/verify-webhook-signature', {
+      method: 'POST',
+      body: JSON.stringify({
+        auth_algo: authAlgo,
+        cert_url: certUrl,
+        transmission_id: transmissionId,
+        transmission_sig: transmissionSig,
+        transmission_time: transmissionTime,
+        webhook_id: webhookId,
+        webhook_event: webhookEvent
+      })
+    });
+    return body?.verification_status === 'SUCCESS';
+  }
 }
 
 async function safeJson(response) {
   try { return await response.json(); } catch { return null; }
+}
+
+function dateOnly(value) {
+  return String(value).slice(0, 10);
+}
+
+function daysUntil(date, asOf) {
+  return Math.floor((Date.parse(`${date}T00:00:00.000Z`) - Date.parse(`${dateOnly(asOf)}T00:00:00.000Z`)) / 86400000);
+}
+
+function buildInvoiceInsight(invoice, asOf) {
+  const closed = ['PAID', 'CANCELLED', 'VOID'].includes(invoice.status);
+  const days = invoice.dueDate ? daysUntil(invoice.dueDate, asOf) : null;
+  let risk = 'LOW';
+  let urgency = 'LOW';
+  let priority = 0;
+  let action = 'NO_ACTION';
+  const reasonCodes = [`STATUS_${invoice.status}`];
+
+  if (invoice.status === 'DRAFT') {
+    risk = 'MEDIUM';
+    urgency = 'HIGH';
+    priority = 90;
+    action = 'SEND_INVOICE';
+    reasonCodes.push('DRAFT_NOT_SENT');
+  } else if (invoice.status === 'SENT') {
+    action = 'MONITOR_PAYMENT';
+    priority = 20;
+    if (days === null) {
+      risk = 'MEDIUM';
+      urgency = 'MEDIUM';
+      priority = 55;
+      action = 'ADD_DUE_DATE';
+      reasonCodes.push('NO_DUE_DATE');
+    } else if (days < 0) {
+      risk = days <= -7 ? 'CRITICAL' : 'HIGH';
+      urgency = days <= -7 ? 'CRITICAL' : 'HIGH';
+      priority = days <= -7 ? 100 : 95;
+      action = 'REMIND_INVOICE';
+      reasonCodes.push('OVERDUE');
+      if (days <= -7) reasonCodes.push('OVERDUE_7_PLUS_DAYS');
+    } else if (days <= 3) {
+      risk = 'HIGH';
+      urgency = 'HIGH';
+      priority = 85;
+      action = 'REMIND_INVOICE';
+      reasonCodes.push('DUE_WITHIN_3_DAYS');
+    } else if (days <= 7) {
+      risk = 'MEDIUM';
+      urgency = 'MEDIUM';
+      priority = 65;
+      action = 'REMIND_INVOICE';
+      reasonCodes.push('DUE_WITHIN_7_DAYS');
+    } else {
+      reasonCodes.push('PAYMENT_PENDING');
+    }
+  } else if (closed) {
+    reasonCodes.push(invoice.status === 'PAID' ? 'PAID_IN_FULL' : 'CLOSED');
+  } else {
+    risk = 'MEDIUM';
+    urgency = 'MEDIUM';
+    priority = 40;
+    action = 'REVIEW_STATUS';
+    reasonCodes.push('UNMAPPED_STATUS');
+  }
+
+  return {
+    invoiceId: invoice.id,
+    customer: invoice.customer,
+    status: invoice.status,
+    amount: invoice.total,
+    currency: invoice.currency,
+    dueDate: invoice.dueDate,
+    daysUntilDue: days,
+    risk,
+    urgency,
+    confidence: days === null && invoice.status === 'SENT' ? 0.84 : 0.99,
+    reasonCodes,
+    nextAction: { type: action, action, priority, invoiceId: invoice.id, reasonCodes: [...reasonCodes] }
+  };
+}
+
+function buildInsights(invoices, { now = new Date().toISOString() } = {}) {
+  const invoiceInsights = invoices.map((invoice) => buildInvoiceInsight(invoice, now));
+  const recommendations = invoiceInsights.slice().sort((a, b) => b.nextAction.priority - a.nextAction.priority || a.invoiceId.localeCompare(b.invoiceId));
+  const horizons = [7, 14, 30];
+  const projectedCashPosition = {};
+  const projections = [];
+  for (const horizonDays of horizons) {
+    const byCurrency = {};
+    for (const insight of invoiceInsights) {
+      if (insight.status !== 'SENT' || insight.daysUntilDue === null || insight.daysUntilDue > horizonDays) continue;
+      byCurrency[insight.currency] = roundCents((byCurrency[insight.currency] || 0) + insight.amount);
+    }
+    projectedCashPosition[String(horizonDays)] = byCurrency;
+    projections.push({ horizonDays, expectedIncoming: byCurrency, invoiceIds: invoiceInsights.filter((item) => item.status === 'SENT' && item.daysUntilDue !== null && item.daysUntilDue <= horizonDays).map((item) => item.invoiceId) });
+  }
+  return {
+    asOf: now,
+    invoices: invoiceInsights,
+    recommendations,
+    projectedCashPosition,
+    projections,
+    nextAction: recommendations[0]?.nextAction || null,
+    prioritizedNextAction: recommendations[0]?.nextAction || null
+  };
 }
 
 function createPayPalAdapter(env = process.env, options = {}) {
@@ -417,6 +621,10 @@ class InvoiceStore {
     return { invoices, summary: { invoiceCount: invoices.length, byStatus, outstanding, paid, totalOutstanding: outstanding.USD || 0, totalPaid: paid.USD || 0 }, adapter: this.adapter.name };
   }
 
+  insights() {
+    return buildInsights(this.listInvoices(), { now: this.clock() });
+  }
+
   createInvoice(input) {
     const id = `inv_${String(this.sequence++).padStart(5, '0')}`;
     const now = this.clock();
@@ -441,7 +649,18 @@ class InvoiceStore {
     return clone(invoice);
   }
 
-  simulateWebhook(input) {
+  async remindInvoice(id) {
+    const invoice = this.getInvoice(id);
+    if (invoice.status !== 'SENT') throw new ValidationError('only a sent invoice can be reminded');
+    if (!invoice.paypalInvoiceId) throw new ValidationError('invoice has not been sent through PayPal');
+    await this.adapter.remindInvoice(invoice.paypalInvoiceId);
+    invoice.reminderCount = (invoice.reminderCount || 0) + 1;
+    invoice.updatedAt = this.clock();
+    invoice.events.push({ type: 'INVOICING.INVOICE.REMINDER_SENT', at: invoice.updatedAt });
+    return clone(invoice);
+  }
+
+  simulateWebhook(input, { source = 'simulated', verified = false } = {}) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ValidationError('webhook body must be an object');
     const eventType = input.eventType ?? input.event_type;
     const resource = input.resource && typeof input.resource === 'object' ? input.resource : {};
@@ -453,15 +672,20 @@ class InvoiceStore {
     if (!invoice) invoice = [...this.invoices.values()].find((candidate) => candidate.paypalInvoiceId === invoiceId);
     if (!invoice) throw new NotFoundError(`invoice ${invoiceId} was not found`);
     const nextStatus = eventType.endsWith('.PAID') ? 'PAID' : eventType.endsWith('.SENT') ? 'SENT' : eventType.endsWith('.VOIDED') ? 'VOID' : 'CANCELLED';
+    const eventId = input.eventId ?? input.event_id ?? input.id;
+    const eventKey = eventId ? `id:${eventId}` : `type:${eventType}`;
+    const duplicate = invoice.events.some((event) => event.eventKey === eventKey || (!eventId && event.type === eventType));
+    if (duplicate) return { accepted: true, duplicate: true, invoice: clone(invoice), event: { type: eventType, invoiceId: invoice.id, source, verified, ...(eventId ? { eventId } : {}) } };
     invoice.status = nextStatus;
     invoice.updatedAt = this.clock();
-    invoice.events.push({ type: eventType, at: invoice.updatedAt });
-    return { accepted: true, invoice: clone(invoice), event: { type: eventType, invoiceId: invoice.id } };
+    invoice.events.push({ type: eventType, at: invoice.updatedAt, source, verified, eventKey, ...(eventId ? { eventId } : {}) });
+    return { accepted: true, duplicate: false, invoice: clone(invoice), event: { type: eventType, invoiceId: invoice.id, source, verified, ...(eventId ? { eventId } : {}) } };
   }
 }
 
 module.exports = {
   DEFAULT_CURRENCY,
+  AuthorizationError,
   InvoiceStore,
   MockPayPalAdapter,
   NotFoundError,
@@ -470,7 +694,9 @@ module.exports = {
   SEEDED_INVOICES,
   ValidationError,
   calculateTotals,
+  buildInsights,
   createPayPalAdapter,
   normalizeInvoiceInput,
-  parseInvoiceText
+  parseInvoiceText,
+  parseInvoiceTextAsync
 };

@@ -3,7 +3,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
-const { InvoiceStore, ValidationError, NotFoundError, PayPalError, createPayPalAdapter, parseInvoiceText } = require('./core');
+const { InvoiceStore, AuthorizationError, ValidationError, NotFoundError, PayPalError, createPayPalAdapter, parseInvoiceTextAsync } = require('./core');
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -69,7 +69,7 @@ async function serveStatic(response, publicDir, pathname) {
   }
 }
 
-function createApp({ store = new InvoiceStore({ adapter: createPayPalAdapter() }), publicDir = path.join(process.cwd(), 'public') } = {}) {
+function createApp({ store = new InvoiceStore({ adapter: createPayPalAdapter() }), publicDir = path.join(process.cwd(), 'public'), parseInvoice = parseInvoiceTextAsync } = {}) {
   return http.createServer(async (request, response) => {
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Referrer-Policy', 'no-referrer');
@@ -78,10 +78,12 @@ function createApp({ store = new InvoiceStore({ adapter: createPayPalAdapter() }
     try {
       if (pathname.startsWith('/api/')) {
         const sendMatch = pathname.match(/^\/api\/invoices\/([A-Za-z0-9_-]{1,80})\/send$/);
-        const knownRoute = pathname === '/api/state' || pathname === '/api/parse-invoice' || pathname === '/api/invoices' || pathname === '/api/webhooks/simulate' || Boolean(sendMatch);
+        const remindMatch = pathname.match(/^\/api\/invoices\/([A-Za-z0-9_-]{1,80})\/remind$/);
+        const knownRoute = pathname === '/api/state' || pathname === '/api/insights' || pathname === '/api/parse-invoice' || pathname === '/api/invoices' || pathname === '/api/webhooks/simulate' || pathname === '/api/webhooks/paypal' || Boolean(sendMatch) || Boolean(remindMatch);
         if (!knownRoute) return sendJson(response, 404, { error: { code: 'NOT_FOUND', message: 'route not found' } });
         if (request.method === 'GET' && pathname === '/api/state') return sendJson(response, 200, store.state());
-        if (pathname === '/api/state') {
+        if (request.method === 'GET' && pathname === '/api/insights') return sendJson(response, 200, store.insights());
+        if (pathname === '/api/state' || pathname === '/api/insights') {
           response.setHeader('Allow', 'GET');
           return sendJson(response, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed' } });
         }
@@ -94,17 +96,35 @@ function createApp({ store = new InvoiceStore({ adapter: createPayPalAdapter() }
         const body = await readJson(request);
         if (pathname === '/api/parse-invoice') {
           if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.text !== 'string') throw new ValidationError('text is required');
-          return sendJson(response, 200, { invoice: parseInvoiceText(body.text) });
+          return sendJson(response, 200, { invoice: await parseInvoice(body.text) });
         }
         if (pathname === '/api/invoices') return sendJson(response, 201, { invoice: store.createInvoice(body) });
         if (sendMatch) return sendJson(response, 200, { invoice: await store.sendInvoice(sendMatch[1]) });
+        if (remindMatch) return sendJson(response, 200, { invoice: await store.remindInvoice(remindMatch[1]) });
         if (pathname === '/api/webhooks/simulate') return sendJson(response, 200, store.simulateWebhook(body));
+        if (pathname === '/api/webhooks/paypal') {
+          if (store.adapter.name !== 'paypal-sandbox' || typeof store.adapter.verifyWebhookSignature !== 'function') throw new ValidationError('verified PayPal webhooks require the PayPal sandbox adapter');
+          const webhookId = process.env.PAYPAL_WEBHOOK_ID;
+          const signature = {
+            transmissionId: request.headers['paypal-transmission-id'],
+            transmissionTime: request.headers['paypal-transmission-time'],
+            certUrl: request.headers['paypal-cert-url'],
+            authAlgo: request.headers['paypal-auth-algo'],
+            transmissionSig: request.headers['paypal-transmission-sig'],
+            webhookId,
+            webhookEvent: body
+          };
+          if (Object.values(signature).some((value) => !value)) throw new AuthorizationError('PayPal webhook signature headers and PAYPAL_WEBHOOK_ID are required');
+          const verified = await store.adapter.verifyWebhookSignature(signature);
+          if (!verified) throw new AuthorizationError('PayPal webhook signature verification failed');
+          return sendJson(response, 200, store.simulateWebhook({ id: body.id, eventType: body.event_type, resource: body.resource }, { source: 'paypal', verified: true }));
+        }
         return sendJson(response, 404, { error: { code: 'NOT_FOUND', message: 'route not found' } });
       }
       if (request.method === 'GET' && await serveStatic(response, publicDir, pathname)) return;
       return sendJson(response, 404, { error: { code: 'NOT_FOUND', message: 'route not found' } });
     } catch (error) {
-      const known = error instanceof ValidationError || error instanceof NotFoundError || error instanceof PayPalError;
+      const known = error instanceof AuthorizationError || error instanceof ValidationError || error instanceof NotFoundError || error instanceof PayPalError;
       if (!known) console.error('request failed:', error.code || error.name || 'error');
       return sendJson(response, known ? error.statusCode : 500, errorPayload(error));
     }
