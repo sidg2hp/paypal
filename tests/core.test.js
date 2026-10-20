@@ -197,6 +197,8 @@ test('HTTP routes expose state, parse/create/send/webhook flows and strict error
 
   const state = await request(server, 'GET', '/api/state');
   assert.equal(state.status, 200);
+  assert.equal(state.headers['x-frame-options'], 'DENY');
+  assert.match(state.headers['content-security-policy'], /default-src 'self'/);
   assert.equal(state.body.invoices.length, 2);
   assert.equal(state.body.adapter, 'mock');
 
