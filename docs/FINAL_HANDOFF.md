@@ -23,7 +23,8 @@ The product's strongest submission story is the visible closed loop: **Signal â†
 - Idempotent simulated and verified webhook events.
 - PayPal signature verification route.
 - Explainable risk, urgency, confidence, reason codes, and 7/14/30-day projections.
-- OpenAI-compatible structured extraction with deterministic fallback.
+- User-selectable OpenAI-compatible structured extraction for OpenAI, xAI/Grok, Gemini/Google, and local Ollama, with automatic cloud-key priority and bounded local Ollama detection.
+- Provider/model/fallback provenance in the parse API and invoice review UI.
 - 10-second bounded outbound requests with configurable maximum of 120 seconds.
 - Secret-free `/api/health` endpoint.
 - Senior-style command-center UX with provenance labels, trust loop, queue, forecast, detail drawer, timeline, focus management, and reduced-motion support.
@@ -81,7 +82,24 @@ These cannot be completed safely without the owner's credentials and deployment 
 5. Deploy to public HTTPS.
 6. Create a PayPal webhook subscription pointing to `/api/webhooks/paypal`.
 7. Set `PAYPAL_WEBHOOK_ID`.
-8. Configure `OPENAI_API_KEY`, or an OpenAI-compatible provider through `OPENAI_BASE_URL` and `OPENAI_MODEL`.
+8. Configure an AI provider, or use local Ollama without a key:
+
+   ```sh
+   # OpenAI
+   AI_PROVIDER=openai OPENAI_API_KEY=... OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_MODEL=gpt-4o-mini npm start
+
+   # xAI/Grok
+   AI_PROVIDER=grok/xai XAI_API_KEY=... XAI_BASE_URL=https://api.x.ai/v1 XAI_MODEL=grok-3-mini npm start
+
+   # Gemini/Google
+   AI_PROVIDER=gemini/google GEMINI_API_KEY=... GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/ GEMINI_MODEL=gemini-2.0-flash npm start
+
+   # Ollama (no API key)
+   ollama pull llama3.2
+   AI_PROVIDER=ollama OLLAMA_BASE_URL=http://127.0.0.1:11434/v1 OLLAMA_MODEL=llama3.2 npm start
+   ```
+
+   `AI_PROVIDER=auto` is the default and prefers configured OpenAI, xAI/Grok, then Gemini keys before a short local Ollama probe. Free tiers and rate limits vary, and API keys are not guaranteed free; local Ollama is the no-key path.
 9. Record the final video and submit the public URL/write-up on Devpost.
 10. Re-check the live rules, sponsor list, deadline, and required deliverables immediately before submission.
 
@@ -90,7 +108,7 @@ These cannot be completed safely without the owner's credentials and deployment 
 The repository's Node shim currently points at Node 22, which is not installed in the worker. The equivalent checks were run with the installed Node 24 binary:
 
 ```text
-14 tests passed
+19 tests passed
 npm run check passed
 git diff --check passed
 Postman collection JSON parsed successfully

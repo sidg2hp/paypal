@@ -36,9 +36,9 @@ The human approval gate is intentional. AI prepares and explains a financial act
 ## API
 
 - `GET /api/state` — seeded invoices, summary totals, and active adapter.
-- `GET /api/health` — secret-free service health with adapter, mode (`mock` or `sandbox`), process uptime in seconds, and supported capabilities.
+- `GET /api/health` — secret-free service health with adapter, mode (`mock` or `sandbox`), process uptime in seconds, supported capabilities, and secret-free AI provider/model status.
 - `GET /api/insights` — deterministic per-invoice risk, urgency, confidence and reason codes, projected incoming cash for 7/14/30 days, and the highest-priority next action.
-- `POST /api/parse-invoice` with `{ "text": "Invoice for ... 2 hours at $150/hour" }` — deterministic offline parsing.
+- `POST /api/parse-invoice` with `{ "text": "Invoice for ... 2 hours at $150/hour" }` — provider-backed structured parsing with deterministic fallback. The response is `{ "invoice": { ... }, "ai": { "provider", "mode", "model", "fallback", "reason" } }`.
 - `POST /api/invoices` — validate and create an in-memory draft.
 - `POST /api/invoices/:id/send` — create/send through mock PayPal or the sandbox REST adapter.
 - `POST /api/invoices/:id/remind` — send a PayPal invoice reminder through the mock or sandbox adapter and add an explainable timeline event.
@@ -47,7 +47,36 @@ The human approval gate is intentional. AI prepares and explains a financial act
 
 The sandbox adapter uses PayPal OAuth at `/v1/oauth2/token` and Invoicing API endpoints at `/v2/invoicing/invoices`, including `/remind`. Secrets are read from environment variables and are never included in application logs or API responses. Webhook simulation is intentionally demo-safe and idempotent: replaying the same event (or the same event type for an invoice when no event id is supplied) does not add another timeline entry. Real webhook ingestion is stricter: it requires `PAYPAL_WEBHOOK_ID`, PayPal signature headers, and a successful PayPal verification response before changing invoice state.
 
-When `OPENAI_API_KEY` is configured, `/api/parse-invoice` uses the OpenAI-compatible `/chat/completions` endpoint (`OPENAI_BASE_URL` and `OPENAI_MODEL` are optional overrides). The request asks for structured JSON, validates the result, and falls back silently to the deterministic parser on provider, network, timeout, or malformed-response failures. Outbound AI and PayPal requests are bounded to 10 seconds by default; override with `AI_TIMEOUT_MS`, `PAYPAL_TIMEOUT_MS`, or the shared `OUTBOUND_TIMEOUT_MS` (maximum 120 seconds). The API key and provider response are never logged. Tests inject a fetch implementation and remain offline.
+### AI providers
+
+All AI providers use the OpenAI-compatible chat completions shape. `AI_PROVIDER=auto` is the default: it chooses configured cloud keys in this order (OpenAI, xAI/Grok, Gemini/Google), then makes one short local Ollama probe, and finally uses the deterministic parser. Cloud services are never probed without a key. Ollama is the no-key path; install it locally and pull a model first. Detection defaults to a bounded 250 ms probe and is cached briefly. Provider requests default to 10 seconds; override with `AI_TIMEOUT_MS`, `PAYPAL_TIMEOUT_MS`, or the shared `OUTBOUND_TIMEOUT_MS` (maximum 120 seconds).
+
+OpenAI:
+
+```sh
+AI_PROVIDER=openai OPENAI_API_KEY=... OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_MODEL=gpt-4o-mini npm start
+```
+
+xAI/Grok:
+
+```sh
+AI_PROVIDER=grok/xai XAI_API_KEY=... XAI_BASE_URL=https://api.x.ai/v1 XAI_MODEL=grok-3-mini npm start
+```
+
+Gemini/Google:
+
+```sh
+AI_PROVIDER=gemini/google GEMINI_API_KEY=... GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/ GEMINI_MODEL=gemini-2.0-flash npm start
+```
+
+Ollama:
+
+```sh
+ollama pull llama3.2
+AI_PROVIDER=ollama OLLAMA_BASE_URL=http://127.0.0.1:11434/v1 OLLAMA_MODEL=llama3.2 npm start
+```
+
+For automatic Ollama detection, leave `AI_PROVIDER=auto` and optionally set `OLLAMA_PROBE_URL=http://127.0.0.1:11434/api/tags` and `OLLAMA_PROBE_TIMEOUT_MS=250`. Provider responses are validated as invoice JSON and any provider, network, timeout, or malformed-response failure falls back silently to deterministic parsing. The API key and provider response are never logged. Free tiers and rate limits vary by provider; a configured key is not guaranteed to be free. Local Ollama is the no-key option. Tests inject fetch implementations and never call real providers.
 
 ## Test and check
 
