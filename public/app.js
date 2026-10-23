@@ -236,10 +236,18 @@
     catch (error) { if (button) { button.disabled = false; button.classList.remove('is-busy'); button.removeAttribute('aria-busy'); button.textContent = 'Send gentle reminder'; } showToast(`Reminder could not be sent · ${error.message}`); }
   }
 
-  function openModal(draft) {
+  function renderAiProvenance(ai = {}) {
+    const provider = ai.provider || 'deterministic';
+    const model = ai.model ? ` · ${ai.model}` : '';
+    const label = provider === 'deterministic' ? 'Deterministic parser · offline mode' : `${provider}${model}`;
+    $('#ai-provenance').textContent = ai.fallback ? `${label} · fallback${ai.reason ? ` — ${ai.reason}` : ''}` : label;
+  }
+
+  function openModal(draft, ai) {
     state.draft = draft; state.items = (draft.items || []).map((item) => ({ ...item })); state.lastFocus = document.activeElement;
     const form = $('#invoice-form'); form.customerName.value = draft.customer?.name || ''; form.customerEmail.value = draft.customer?.email || ''; form.dueDate.value = draft.dueDate || ''; form.taxRate.value = draft.taxRate ?? 0; form.notes.value = draft.notes || '';
     $('#extraction-summary').textContent = `I found ${state.items.length} line item${state.items.length === 1 ? '' : 's'} for ${draft.customer?.name || 'your customer'} and calculated ${money(draft.total)}.`;
+    renderAiProvenance(ai);
     renderFormItems(); $('#modal-backdrop').hidden = false; document.body.style.overflow = 'hidden'; setTimeout(() => form.customerName.focus(), 0);
   }
   function closeModal() { $('#modal-backdrop').hidden = true; document.body.style.overflow = ''; state.lastFocus?.focus?.(); }
@@ -250,7 +258,7 @@
   }
   function updateFormTotals() { const subtotal = state.items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unitPrice || 0), 0); const tax = subtotal * (Number($('#invoice-form').taxRate.value || 0) / 100); $('#form-subtotal').textContent = money(subtotal); $('#form-tax').textContent = money(tax); $('#form-total').textContent = money(subtotal + tax); $$('#form-items .item-row').forEach((row, index) => { const amount = row.querySelector('input[disabled]'); if (amount) amount.value = money(Number(state.items[index]?.quantity || 0) * Number(state.items[index]?.unitPrice || 0)); }); }
 
-  async function parsePrompt(text) { if (!text.trim()) { showToast('Tell me what needs to get paid first.'); return; } const button = $('#parse-button'); button.disabled = true; button.classList.add('is-busy'); button.setAttribute('aria-busy', 'true'); button.textContent = 'Drafting…'; try { const result = await api('/api/parse-invoice', { method: 'POST', body: JSON.stringify({ text }) }); openModal(result.invoice); } catch (error) { showToast(`Couldn’t draft invoice · ${error.message}`); } finally { button.disabled = false; button.classList.remove('is-busy'); button.removeAttribute('aria-busy'); button.textContent = '↗'; } }
+  async function parsePrompt(text) { if (!text.trim()) { showToast('Tell me what needs to get paid first.'); return; } const button = $('#parse-button'); button.disabled = true; button.classList.add('is-busy'); button.setAttribute('aria-busy', 'true'); button.textContent = 'Drafting…'; try { const result = await api('/api/parse-invoice', { method: 'POST', body: JSON.stringify({ text }) }); openModal(result.invoice, result.ai); } catch (error) { showToast(`Couldn’t draft invoice · ${error.message}`); } finally { button.disabled = false; button.classList.remove('is-busy'); button.removeAttribute('aria-busy'); button.textContent = '↗'; } }
   async function submitDraft(event) { event.preventDefault(); const form = event.currentTarget; const payload = { customer: { name: form.customerName.value.trim(), email: form.customerEmail.value.trim() }, dueDate: form.dueDate.value || null, taxRate: Number(form.taxRate.value || 0), items: state.items.map((item) => ({ description: String(item.description || '').trim(), quantity: Number(item.quantity), unitPrice: Number(item.unitPrice) })), notes: form.notes.value.trim() || null }; const submit = form.querySelector('button[type="submit"]'); submit.disabled = true; submit.classList.add('is-busy'); submit.setAttribute('aria-busy', 'true'); submit.textContent = 'Sending…'; try { const created = await api('/api/invoices', { method: 'POST', body: JSON.stringify(payload) }); await api(`/api/invoices/${encodeURIComponent(created.invoice.id)}/send`, { method: 'POST', body: '{}' }); closeModal(); await refreshData({ silent: true }); showToast(state.mode === 'sandbox' ? 'Invoice approved and sent through PayPal Sandbox.' : 'Invoice approved and sent through the mock adapter.'); } catch (error) { showToast(`Couldn’t send invoice · ${error.message}`); } finally { submit.disabled = false; submit.classList.remove('is-busy'); submit.removeAttribute('aria-busy'); submit.innerHTML = '<span>✓</span> Approve &amp; send with PayPal'; } }
 
   async function simulatePaid() { const invoice = state.data?.invoices?.find((item) => item.status === 'SENT'); if (!invoice) { showToast('No sent invoice is waiting for a payment event.'); return; } const button = $('#simulate-button'); button.disabled = true; button.classList.add('is-busy'); try { await api('/api/webhooks/simulate', { method: 'POST', body: JSON.stringify({ eventType: 'INVOICING.INVOICE.PAID', invoiceId: invoice.id }) }); await refreshData({ silent: true }); showToast(`${invoice.customer?.name || 'Client'} paid ${money(invoice.total, invoice.currency)} — simulated webhook recorded.`); } catch (error) { showToast(`Demo webhook failed · ${error.message}`); } finally { button.disabled = false; button.classList.remove('is-busy'); } }
