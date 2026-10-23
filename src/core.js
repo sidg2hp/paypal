@@ -4,6 +4,29 @@ const DEFAULT_CURRENCY = 'USD';
 const MAX_BODY_TEXT = 8000;
 const DEFAULT_OUTBOUND_TIMEOUT_MS = 10000;
 const MAX_OUTBOUND_TIMEOUT_MS = 120000;
+const DEFAULT_OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1';
+const DEFAULT_OLLAMA_MODEL = 'llama3.2';
+const DEFAULT_OLLAMA_PROBE_TIMEOUT_MS = 250;
+const AI_PROVIDER_ALIASES = Object.freeze({
+  auto: 'auto',
+  deterministic: 'deterministic',
+  ollama: 'ollama',
+  openai: 'openai',
+  grok: 'xai',
+  xai: 'xai',
+  'grok/xai': 'xai',
+  gemini: 'gemini',
+  google: 'gemini',
+  'gemini/google': 'gemini'
+});
+const AI_PROVIDER_MODELS = Object.freeze({
+  openai: 'gpt-4o-mini',
+  xai: 'grok-3-mini',
+  gemini: 'gemini-2.0-flash',
+  ollama: DEFAULT_OLLAMA_MODEL
+});
+const AI_DETECTION_CACHE_TTL_MS = 5000;
+const ollamaDetectionCache = new Map();
 const INVOICE_TRANSITIONS = Object.freeze({
   DRAFT: Object.freeze(['SENT']),
   SENT: Object.freeze(['PAID', 'CANCELLED', 'VOID'])
@@ -240,6 +263,139 @@ function parseItems(text) {
   return items;
 }
 
+function normalizeAIProvider(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return AI_PROVIDER_ALIASES[normalized] || null;
+}
+
+function configuredValue(env, ...names) {
+  for (const name of names) {
+    if (typeof env[name] === 'string' && env[name].trim()) return env[name].trim();
+  }
+  return '';
+}
+
+function providerModel(provider, env, overrides = {}) {
+  if (overrides.model) return String(overrides.model).trim();
+  if (provider === 'openai') return configuredValue(env, 'OPENAI_MODEL') || AI_PROVIDER_MODELS.openai;
+  if (provider === 'xai') return configuredValue(env, 'GROK_MODEL', 'XAI_MODEL') || AI_PROVIDER_MODELS.xai;
+  if (provider === 'gemini') return configuredValue(env, 'GEMINI_MODEL') || AI_PROVIDER_MODELS.gemini;
+  if (provider === 'ollama') return configuredValue(env, 'OLLAMA_MODEL') || AI_PROVIDER_MODELS.ollama;
+  return null;
+}
+
+function providerBaseUrl(provider, env, overrides = {}) {
+  if (overrides.baseUrl) return String(overrides.baseUrl).trim().replace(/\/$/, '');
+  if (provider === 'openai') return configuredValue(env, 'OPENAI_BASE_URL') || 'https://api.openai.com/v1';
+  if (provider === 'xai') return configuredValue(env, 'XAI_BASE_URL') || 'https://api.x.ai/v1';
+  if (provider === 'gemini') return configuredValue(env, 'GEMINI_BASE_URL') || 'https://generativelanguage.googleapis.com/v1beta/openai';
+  if (provider === 'ollama') return configuredValue(env, 'OLLAMA_BASE_URL') || DEFAULT_OLLAMA_BASE_URL;
+  return null;
+}
+
+function providerKey(provider, env, overrides = {}) {
+  if (Object.prototype.hasOwnProperty.call(overrides, 'apiKey')) return overrides.apiKey || '';
+  if (provider === 'openai') return configuredValue(env, 'OPENAI_API_KEY');
+  if (provider === 'xai') return configuredValue(env, 'XAI_API_KEY', 'GROK_API_KEY');
+  if (provider === 'gemini') return configuredValue(env, 'GEMINI_API_KEY', 'GOOGLE_API_KEY');
+  if (provider === 'ollama') return 'ollama';
+  return '';
+}
+
+function ollamaProbeUrl(env) {
+  if (configuredValue(env, 'OLLAMA_PROBE_URL')) return configuredValue(env, 'OLLAMA_PROBE_URL');
+  const baseUrl = configuredValue(env, 'OLLAMA_BASE_URL') || DEFAULT_OLLAMA_BASE_URL;
+  return baseUrl.replace(/\/v1\/?$/, '') + '/api/tags';
+}
+
+function probeCacheKey(env) {
+  return ollamaProbeUrl(env);
+}
+
+async function detectOllama({ env = process.env, fetchImpl = globalThis.fetch } = {}) {
+  const url = probeCacheKey(env);
+  const cached = ollamaDetectionCache.get(url);
+  if (cached && cached.expiresAt > Date.now()) return cached.reachable;
+  if (typeof fetchImpl !== 'function') return false;
+  const timeoutMs = Math.min(normalizeTimeout(env.OLLAMA_PROBE_TIMEOUT_MS, DEFAULT_OLLAMA_PROBE_TIMEOUT_MS), 2000);
+  let reachable = false;
+  try {
+    const response = await fetchWithTimeout(fetchImpl, url, { method: 'GET', headers: { Accept: 'application/json' } }, timeoutMs, 'Ollama detection');
+    reachable = Boolean(response && response.ok !== false && (!response.status || response.status < 400));
+  } catch {
+    reachable = false;
+  }
+  ollamaDetectionCache.set(url, { reachable, expiresAt: Date.now() + AI_DETECTION_CACHE_TTL_MS });
+  return reachable;
+}
+
+function deterministicProvider(reason, fallback = true) {
+  return { provider: 'deterministic', mode: 'deterministic', model: null, fallback, reason };
+}
+
+function publicAIProviderMetadata(value) {
+  return { provider: value.provider, mode: value.mode, model: value.model ?? null, fallback: Boolean(value.fallback), reason: value.reason || null };
+}
+
+async function resolveAIProvider({ env = process.env, fetchImpl = globalThis.fetch, provider, apiKey, baseUrl, model } = {}) {
+  const overrides = {};
+  if (apiKey !== undefined) overrides.apiKey = apiKey;
+  if (baseUrl !== undefined) overrides.baseUrl = baseUrl;
+  if (model !== undefined) overrides.model = model;
+  const configuredProvider = provider === undefined ? configuredValue(env, 'AI_PROVIDER') || 'auto' : provider;
+  const normalized = normalizeAIProvider(configuredProvider);
+  if (!normalized) return { ...deterministicProvider('Unsupported AI_PROVIDER; using deterministic parser'), configuredProvider: String(configuredProvider), requestedProvider: String(configuredProvider) };
+  if (normalized === 'deterministic') return { ...deterministicProvider('Explicit deterministic provider', false), configuredProvider: normalized, requestedProvider: normalized };
+
+  let selected = normalized;
+  let reason = null;
+  if (normalized === 'auto') {
+    if (apiKey !== undefined && apiKey) selected = 'openai';
+    else if (configuredValue(env, 'OPENAI_API_KEY')) selected = 'openai';
+    else if (configuredValue(env, 'XAI_API_KEY', 'GROK_API_KEY')) selected = 'xai';
+    else if (configuredValue(env, 'GEMINI_API_KEY', 'GOOGLE_API_KEY')) selected = 'gemini';
+    else if (await detectOllama({ env, fetchImpl })) selected = 'ollama';
+    else return { ...deterministicProvider('No configured cloud provider and local Ollama was not reachable'), configuredProvider: 'auto', requestedProvider: 'auto' };
+  }
+  const key = providerKey(selected, env, overrides);
+  if (!key) return { ...deterministicProvider(`${selected} API key is not configured`), configuredProvider: normalized, requestedProvider: normalized };
+  return {
+    provider: selected,
+    mode: 'ai',
+    model: providerModel(selected, env, overrides),
+    baseUrl: providerBaseUrl(selected, env, overrides),
+    apiKey: key,
+    fallback: false,
+    reason,
+    configuredProvider: normalized,
+    requestedProvider: normalized
+  };
+}
+
+function getAIProviderStatus({ env = process.env } = {}) {
+  const configuredProvider = configuredValue(env, 'AI_PROVIDER') || 'auto';
+  const normalized = normalizeAIProvider(configuredProvider);
+  if (!normalized) return { configuredProvider: configuredProvider.toLowerCase(), selectedProvider: 'deterministic', mode: 'deterministic', model: null, fallback: true, reason: 'Unsupported AI_PROVIDER; using deterministic parser', configured: {} };
+  const configured = {
+    openai: Boolean(configuredValue(env, 'OPENAI_API_KEY')),
+    xai: Boolean(configuredValue(env, 'XAI_API_KEY', 'GROK_API_KEY')),
+    gemini: Boolean(configuredValue(env, 'GEMINI_API_KEY', 'GOOGLE_API_KEY')),
+    // Ollama has a documented local default, so selecting it explicitly is
+    // enough to make it a configured provider even when no URL is supplied.
+    ollama: configuredProvider === 'ollama' || Boolean(configuredValue(env, 'OLLAMA_BASE_URL'))
+  };
+  if (normalized === 'deterministic') return { configuredProvider: normalized, selectedProvider: normalized, mode: 'deterministic', model: null, fallback: false, reason: 'Explicit deterministic provider', configured };
+  if (normalized !== 'auto') {
+    const keyConfigured = normalized === 'ollama' || configured[normalized];
+    return { configuredProvider: normalized, selectedProvider: keyConfigured ? normalized : 'deterministic', mode: keyConfigured ? 'ai' : 'deterministic', model: keyConfigured ? providerModel(normalized, env) : null, fallback: !keyConfigured, reason: keyConfigured ? null : `${normalized} API key is not configured`, configured };
+  }
+  const selected = configured.openai ? 'openai' : configured.xai ? 'xai' : configured.gemini ? 'gemini' : null;
+  if (selected) return { configuredProvider: normalized, selectedProvider: selected, mode: 'ai', model: providerModel(selected, env), fallback: false, reason: null, configured };
+  const cached = ollamaDetectionCache.get(probeCacheKey(env));
+  if (cached?.expiresAt > Date.now() && cached.reachable) return { configuredProvider: normalized, selectedProvider: 'ollama', mode: 'ai', model: providerModel('ollama', env), fallback: false, reason: 'Local Ollama detected', configured };
+  return { configuredProvider: normalized, selectedProvider: 'deterministic', mode: 'deterministic', model: null, fallback: true, reason: 'No configured cloud provider; Ollama detection has not confirmed a local server', configured };
+}
+
 function parseInvoiceText(input, { openAIHook, now = new Date() } = {}) {
   // Keep this synchronous deterministic path available for offline callers.
   // The HTTP app uses parseInvoiceTextAsync so an optional AI extractor can be
@@ -289,23 +445,27 @@ function parseAiJson(content) {
   return JSON.parse(withoutFence);
 }
 
-async function parseInvoiceTextAsync(input, {
-  apiKey = process.env.OPENAI_API_KEY,
+async function parseInvoiceTextWithMetadataAsync(input, {
+  env = process.env,
+  provider,
+  apiKey,
   fetchImpl = globalThis.fetch,
-  baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-  model = process.env.OPENAI_MODEL || 'gpt-4o-mini',
-  timeoutMs = normalizeTimeout(process.env.AI_TIMEOUT_MS || process.env.OUTBOUND_TIMEOUT_MS),
+  baseUrl,
+  model,
+  timeoutMs = normalizeTimeout(env.AI_TIMEOUT_MS || env.OUTBOUND_TIMEOUT_MS),
   now = new Date()
 } = {}) {
-  if (!apiKey) return parseInvoiceText(input, { now });
-  if (typeof fetchImpl !== 'function') return parseInvoiceText(input, { now });
+  const resolved = await resolveAIProvider({ env, provider, apiKey, baseUrl, model, fetchImpl });
+  if (resolved.mode !== 'ai' || typeof fetchImpl !== 'function') {
+    return { invoice: parseInvoiceText(input, { now }), ai: publicAIProviderMetadata(resolved.mode === 'ai' ? deterministicProvider('AI fetch is unavailable') : resolved) };
+  }
   try {
     if (typeof input !== 'string' || input.trim().length < 3 || input.length > MAX_BODY_TEXT) throw new ValidationError(`text must be between 3 and ${MAX_BODY_TEXT} characters`);
-    const response = await fetchWithTimeout(fetchImpl, `${baseUrl.replace(/\/$/, '')}/chat/completions`, {
+    const response = await fetchWithTimeout(fetchImpl, `${resolved.baseUrl.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${resolved.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model,
+        model: resolved.model,
         temperature: 0,
         messages: [
           { role: 'system', content: 'Extract an invoice into JSON only. Return customer {name,email}, currency, dueDate (YYYY-MM-DD or null), items [{description,quantity,unitPrice}], taxRate, and optional notes. Do not invent missing values.' },
@@ -316,13 +476,19 @@ async function parseInvoiceTextAsync(input, {
     const body = await safeJson(response, normalizeTimeout(timeoutMs), 'AI extraction response');
     if (!response.ok) throw new Error(`AI extraction failed (${response.status})`);
     const content = body?.choices?.[0]?.message?.content;
-    return normalizeAiExtraction(parseAiJson(content), now);
+    return { invoice: normalizeAiExtraction(parseAiJson(content), now), ai: publicAIProviderMetadata(resolved) };
   } catch (error) {
     // AI is an enhancement, never a dependency. Deliberately do not log the
     // error because provider responses can contain prompts or sensitive data.
     if (error instanceof ValidationError && /^text must be/.test(error.message)) throw error;
-    return parseInvoiceText(input, { now });
+    const reason = error?.code === 'ETIMEDOUT' ? `${resolved.provider} request timed out` : `${resolved.provider} response was unavailable or invalid`;
+    return { invoice: parseInvoiceText(input, { now }), ai: publicAIProviderMetadata(deterministicProvider(reason)) };
   }
+}
+
+async function parseInvoiceTextAsync(input, options = {}) {
+  const result = await parseInvoiceTextWithMetadataAsync(input, options);
+  return result.invoice;
 }
 
 function normalizeInvoiceInput(input, id, now) {
@@ -778,7 +944,10 @@ module.exports = {
   calculateTotals,
   buildInsights,
   createPayPalAdapter,
+  getAIProviderStatus,
   normalizeInvoiceInput,
   parseInvoiceText,
-  parseInvoiceTextAsync
+  parseInvoiceTextAsync,
+  parseInvoiceTextWithMetadataAsync,
+  resolveAIProvider
 };

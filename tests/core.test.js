@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const { createApp } = require('../src/server');
-const { InvoiceStore, MockPayPalAdapter, PayPalSandboxAdapter, ValidationError, calculateTotals, parseInvoiceText, parseInvoiceTextAsync } = require('../src/core');
+const { InvoiceStore, MockPayPalAdapter, PayPalSandboxAdapter, ValidationError, calculateTotals, parseInvoiceText, parseInvoiceTextAsync, parseInvoiceTextWithMetadataAsync, resolveAIProvider } = require('../src/core');
 
 function createTestStore() {
   return new InvoiceStore({ adapter: new MockPayPalAdapter(), clock: () => '2026-10-20T12:00:00.000Z' });
@@ -172,6 +172,98 @@ test('configured AI extraction validates a structured OpenAI-compatible response
   });
   assert.equal(parsed.customer.name, 'AI Buyer');
   assert.equal(parsed.total, 100);
+});
+
+test('provider aliases use explicit xAI base URLs, models, and bearer headers', async () => {
+  let call;
+  const result = await parseInvoiceTextWithMetadataAsync('anything', {
+    env: { AI_PROVIDER: 'grok/xai', XAI_API_KEY: 'xai-key', XAI_BASE_URL: 'https://xai.test/v1', XAI_MODEL: 'grok-test' },
+    fetchImpl: async (url, options) => {
+      call = { url, options };
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({ customer: { name: 'xAI Buyer', email: 'xai@example.com' }, items: [{ description: 'Work', quantity: 1, unitPrice: 25 }], currency: 'USD', dueDate: null }) } }] }) };
+    }
+  });
+  assert.equal(call.url, 'https://xai.test/v1/chat/completions');
+  assert.equal(call.options.headers.Authorization, 'Bearer xai-key');
+  assert.equal(JSON.parse(call.options.body).model, 'grok-test');
+  assert.deepEqual(result.ai, { provider: 'xai', mode: 'ai', model: 'grok-test', fallback: false, reason: null });
+});
+
+test('auto provider prefers configured cloud keys without probing external services', async () => {
+  let calls = 0;
+  const resolved = await resolveAIProvider({
+    env: { AI_PROVIDER: 'auto', OPENAI_API_KEY: 'openai-key', XAI_API_KEY: 'xai-key', GEMINI_API_KEY: 'gemini-key', OLLAMA_PROBE_URL: 'http://unique-auto-priority.test/api/tags' },
+    fetchImpl: async () => { calls += 1; throw new Error('probe should not run'); }
+  });
+  assert.equal(resolved.provider, 'openai');
+  assert.equal(resolved.model, 'gpt-4o-mini');
+  assert.equal(calls, 0);
+});
+
+test('auto provider detects local Ollama and caches the bounded probe', async () => {
+  const calls = [];
+  const env = { AI_PROVIDER: 'auto', OLLAMA_PROBE_URL: 'http://unique-ollama.test/api/tags', OLLAMA_BASE_URL: 'http://unique-ollama.test/v1', OLLAMA_MODEL: 'local-test' };
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    if (url.endsWith('/api/tags')) return { ok: true, status: 200 };
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({ customer: { name: 'Local Buyer', email: 'local@example.com' }, items: [{ description: 'Local work', quantity: 1, unitPrice: 40 }], currency: 'USD', dueDate: null }) } }] }) };
+  };
+  const first = await parseInvoiceTextWithMetadataAsync('anything', { env, fetchImpl });
+  const second = await parseInvoiceTextWithMetadataAsync('anything', { env, fetchImpl });
+  assert.equal(first.ai.provider, 'ollama');
+  assert.equal(second.ai.provider, 'ollama');
+  assert.equal(calls.filter((call) => call.url.endsWith('/api/tags')).length, 1);
+  assert.equal(calls.filter((call) => call.url.endsWith('/chat/completions')).length, 2);
+  assert.equal(calls.find((call) => call.url.endsWith('/chat/completions')).options.headers.Authorization, 'Bearer ollama');
+});
+
+test('metadata reports deterministic fallback when a selected provider fails', async () => {
+  const result = await parseInvoiceTextWithMetadataAsync('Invoice for Metadata Buyer <metadata@example.com>\n1 audit at $100', {
+    env: { AI_PROVIDER: 'openai', OPENAI_API_KEY: 'test-key', OPENAI_BASE_URL: 'http://metadata.test/v1' },
+    fetchImpl: async () => { throw new Error('offline'); }
+  });
+  assert.equal(result.ai.provider, 'deterministic');
+  assert.equal(result.ai.mode, 'deterministic');
+  assert.equal(result.ai.fallback, true);
+  assert.match(result.ai.reason, /openai/i);
+  assert.equal(result.invoice.total, 100);
+});
+
+test('health exposes selected AI provider and model without exposing keys', async (t) => {
+  const previous = { provider: process.env.AI_PROVIDER, key: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL };
+  process.env.AI_PROVIDER = 'openai';
+  process.env.OPENAI_API_KEY = 'health-secret';
+  process.env.OPENAI_MODEL = 'health-model';
+  const server = createApp({ store: createTestStore(), publicDir: 'missing-public', parseInvoice: parseInvoiceText });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    server.close();
+    if (previous.provider === undefined) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = previous.provider;
+    if (previous.key === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous.key;
+    if (previous.model === undefined) delete process.env.OPENAI_MODEL; else process.env.OPENAI_MODEL = previous.model;
+  });
+  const health = await request(server, 'GET', '/api/health');
+  assert.equal(health.body.ai.configuredProvider, 'openai');
+  assert.equal(health.body.ai.selectedProvider, 'openai');
+  assert.equal(health.body.ai.model, 'health-model');
+  assert.equal(Object.prototype.hasOwnProperty.call(health.body.ai, 'apiKey'), false);
+  assert.equal(JSON.stringify(health.body).includes('health-secret'), false);
+});
+
+test('explicit Ollama selection uses the local default without an API key', () => {
+  const previous = { provider: process.env.AI_PROVIDER, ollamaBase: process.env.OLLAMA_BASE_URL };
+  process.env.AI_PROVIDER = 'ollama';
+  delete process.env.OLLAMA_BASE_URL;
+  try {
+    const { getAIProviderStatus } = require('../src/core');
+    const status = getAIProviderStatus();
+    assert.equal(status.selectedProvider, 'ollama');
+    assert.equal(status.mode, 'ai');
+    assert.equal(status.model, 'llama3.2');
+  } finally {
+    if (previous.provider === undefined) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = previous.provider;
+    if (previous.ollamaBase === undefined) delete process.env.OLLAMA_BASE_URL; else process.env.OLLAMA_BASE_URL = previous.ollamaBase;
+  }
 });
 
 test('PayPal sandbox requests abort when the provider exceeds its timeout', async () => {

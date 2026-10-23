@@ -3,7 +3,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
-const { InvoiceStore, AuthorizationError, ValidationError, NotFoundError, PayPalError, createPayPalAdapter, parseInvoiceTextAsync } = require('./core');
+const { InvoiceStore, AuthorizationError, ValidationError, NotFoundError, PayPalError, createPayPalAdapter, getAIProviderStatus, parseInvoiceTextWithMetadataAsync } = require('./core');
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -22,6 +22,7 @@ function errorPayload(error) {
 
 function healthPayload(store) {
   const adapter = store.adapter?.name || 'unknown';
+  const ai = getAIProviderStatus();
   return {
     status: 'ok',
     adapter,
@@ -34,7 +35,16 @@ function healthPayload(store) {
       reminders: true,
       webhookSimulation: true,
       paypalWebhooks: adapter === 'paypal-sandbox' && typeof store.adapter.verifyWebhookSignature === 'function',
-      aiParsing: Boolean(process.env.OPENAI_API_KEY)
+      aiParsing: ai.selectedProvider !== 'deterministic'
+    },
+    ai: {
+      configuredProvider: ai.configuredProvider,
+      selectedProvider: ai.selectedProvider,
+      mode: ai.mode,
+      model: ai.model,
+      fallback: ai.fallback,
+      reason: ai.reason,
+      configured: ai.configured
     }
   };
 }
@@ -88,7 +98,7 @@ async function serveStatic(response, publicDir, pathname) {
   }
 }
 
-function createApp({ store = new InvoiceStore({ adapter: createPayPalAdapter() }), publicDir = path.join(process.cwd(), 'public'), parseInvoice = parseInvoiceTextAsync } = {}) {
+function createApp({ store = new InvoiceStore({ adapter: createPayPalAdapter() }), publicDir = path.join(process.cwd(), 'public'), parseInvoice = parseInvoiceTextWithMetadataAsync } = {}) {
   return http.createServer(async (request, response) => {
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Referrer-Policy', 'no-referrer');
@@ -119,7 +129,9 @@ function createApp({ store = new InvoiceStore({ adapter: createPayPalAdapter() }
         const body = await readJson(request);
         if (pathname === '/api/parse-invoice') {
           if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.text !== 'string') throw new ValidationError('text is required');
-          return sendJson(response, 200, { invoice: await parseInvoice(body.text) });
+          const parsed = await parseInvoice(body.text);
+          if (parsed && parsed.invoice && parsed.ai) return sendJson(response, 200, parsed);
+          return sendJson(response, 200, { invoice: parsed, ai: { provider: 'deterministic', mode: 'deterministic', model: null, fallback: false, reason: 'Custom parser' } });
         }
         if (pathname === '/api/invoices') return sendJson(response, 201, { invoice: store.createInvoice(body) });
         if (sendMatch) return sendJson(response, 200, { invoice: await store.sendInvoice(sendMatch[1]) });
