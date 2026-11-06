@@ -504,7 +504,7 @@ function getAIProviderStatus({ env = process.env } = {}) {
     gemini: Boolean(configuredValue(env, 'GEMINI_API_KEY', 'GOOGLE_API_KEY')),
     // Ollama has a documented local default, so selecting it explicitly is
     // enough to make it a configured provider even when no URL is supplied.
-    ollama: configuredProvider === 'ollama' || Boolean(configuredValue(env, 'OLLAMA_BASE_URL'))
+    ollama: normalizeAIProvider(configuredProvider) === 'ollama' || Boolean(configuredValue(env, 'OLLAMA_BASE_URL'))
   };
   if (normalized === 'deterministic') return { configuredProvider: normalized, selectedProvider: normalized, mode: 'deterministic', model: null, fallback: false, reason: 'Explicit deterministic provider', configured };
   if (normalized !== 'auto') {
@@ -920,7 +920,8 @@ class PayPalSandboxAdapter {
       return this.token.value;
     } catch (error) {
       if (error.code === 'ETIMEDOUT') throw new PayPalError('PayPal authentication request timed out');
-      throw error;
+      if (error instanceof PayPalError) throw error;
+      throw new PayPalError('PayPal authentication request failed');
     }
   }
 
@@ -937,7 +938,8 @@ class PayPalSandboxAdapter {
       return body;
     } catch (error) {
       if (error.code === 'ETIMEDOUT') throw new PayPalError('PayPal API request timed out');
-      throw error;
+      if (error instanceof PayPalError) throw error;
+      throw new PayPalError('PayPal API request failed');
     }
   }
 

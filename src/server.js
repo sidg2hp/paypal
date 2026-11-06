@@ -181,8 +181,8 @@ function sameOrigin(request, config) {
   }
 }
 
-function aiStatus() {
-  const ai = getAIProviderStatus();
+function aiStatus(env = process.env) {
+  const ai = getAIProviderStatus({ env });
   return {
     configuredProvider: ai.configuredProvider,
     selectedProvider: ai.selectedProvider,
@@ -194,9 +194,9 @@ function aiStatus() {
   };
 }
 
-function healthPayload(store, config) {
+function healthPayload(store, config, env = process.env) {
   const adapter = store.adapter?.name || 'unknown';
-  const ai = aiStatus();
+  const ai = aiStatus(env);
   return {
     status: 'ok',
     version: config.version,
@@ -223,7 +223,7 @@ function healthPayload(store, config) {
   };
 }
 
-function stateMeta(store, config) {
+function stateMeta(store, config, env = process.env) {
   const adapter = store.adapter.name;
   return {
     version: config.version,
@@ -236,7 +236,7 @@ function stateMeta(store, config) {
     },
     agent: { enabled: true, planTtlMinutes: 15 },
     audit: { chain: 'sha256' },
-    policy: { version: store.policy?.version || 1, source: process.env.POLICY_FILE ? 'file' : 'default' },
+    policy: { version: store.policy?.version || 1, source: env.POLICY_FILE ? 'file' : 'default' },
     features: {
       webhookSimulation: config.allowWebhookSimulation,
       demoReset: true,
@@ -248,7 +248,7 @@ function stateMeta(store, config) {
       render: true,
       postman: true
     },
-    ai: aiStatus()
+    ai: aiStatus(env)
   };
 }
 
@@ -291,9 +291,9 @@ function createApp({
         const payOrderMatch = pathname.match(/^\/api\/pay\/([A-Za-z0-9_-]{10,128})\/order$/);
         const payCaptureMatch = pathname.match(/^\/api\/pay\/([A-Za-z0-9_-]{10,128})\/capture$/);
 
-        if (request.method === 'GET' && pathname === '/api/health') return sendJson(response, 200, healthPayload(invoiceStore, config));
+        if (request.method === 'GET' && pathname === '/api/health') return sendJson(response, 200, healthPayload(invoiceStore, config, env));
         if (request.method === 'GET' && pathname === '/api/state') {
-          return sendJson(response, 200, { ...invoiceStore.state(), meta: stateMeta(invoiceStore, config) });
+          return sendJson(response, 200, { ...invoiceStore.state(), meta: stateMeta(invoiceStore, config, env) });
         }
         if (request.method === 'GET' && pathname === '/api/insights') return sendJson(response, 200, invoiceStore.insights());
         if (request.method === 'GET' && pathname === '/api/policy') {
@@ -349,7 +349,7 @@ function createApp({
             if (header !== `Bearer ${config.demoResetSecret}`) throw new AuthorizationError('demo reset token is required');
           }
           const reset = invoiceStore.reset();
-          return sendJson(response, 200, { reset: true, ...reset, meta: stateMeta(invoiceStore, config) });
+          return sendJson(response, 200, { reset: true, ...reset, meta: stateMeta(invoiceStore, config, env) });
         }
         if (write && payOrderMatch) {
           const invoice = invoiceStore.findByPayToken(payOrderMatch[1]);
