@@ -1,16 +1,29 @@
 {
   "name": "paypal-cashflow-copilot",
-  "version": "0.1.0",
-  "description": "Offline-first PayPal Cashflow Copilot MVP backend",
+  "version": "1.0.0",
+  "description": "AI accounts-receivable operator for PayPal: natural language to a reviewable invoice, PayPal Invoicing + Checkout, verified webhooks, and an explainable, policy-gated collections plan.",
   "private": true,
   "type": "commonjs",
   "main": "src/server.js",
+  "license": "MIT",
   "scripts": {
     "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
     "test": "node --test",
-    "check": "node --check src/core.js && node --check src/server.js && node --check tests/core.test.js && node --check public/app.js"
+    "check": "node --check src/core.js && node --check src/server.js && node --check src/agent.js && node --check src/audit.js && node --check src/policy.js && node --check src/forecast.js && node --check src/persistence.js && node --check public/app.js && node --check public/pay.js && node --check scripts/backtest.js && node --check scripts/eval.js && node --check scripts/sandbox-check.js",
+    "eval": "node scripts/eval.js",
+    "backtest": "node scripts/backtest.js",
+    "sandbox:check": "node scripts/sandbox-check.js",
+    "verify": "npm run check && npm test && npm run eval"
   },
   "engines": {
-    "node": ">=22 <23"
-  }
+    "node": ">=22"
+  },
+  "keywords": [
+    "paypal",
+    "ai",
+    "accounts-receivable",
+    "invoicing",
+    "agent"
+  ]
 }

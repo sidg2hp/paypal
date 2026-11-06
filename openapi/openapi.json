@@ -1,0 +1,1809 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Cashflow Copilot API",
+    "version": "1.0.0",
+    "description": "The API behind Cashflow Copilot, an AI accounts-receivable operator built on\nPayPal Invoicing v2, PayPal Checkout (Orders v2), and verified webhooks.\n\nEvery mutating financial action is explicit: the agent proposes a plan, the\nmerchant approves individual steps, and only then does the server call PayPal.\nAll monetary totals are recalculated server-side in integer cents.\n",
+    "contact": {
+      "name": "Cashflow Copilot",
+      "url": "https://github.com/sidg2hp/paypal"
+    },
+    "license": {
+      "name": "MIT",
+      "url": "https://github.com/sidg2hp/paypal/blob/master/LICENSE"
+    }
+  },
+  "security": [],
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local demo (mock PayPal adapter, no credentials required)"
+    },
+    {
+      "url": "https://cashflow-copilot.onrender.com",
+      "description": "Hosted demo (mock or sandbox adapter, shown by /api/health)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Health"
+    },
+    {
+      "name": "Invoices"
+    },
+    {
+      "name": "Insights"
+    },
+    {
+      "name": "Copilot"
+    },
+    {
+      "name": "Checkout"
+    },
+    {
+      "name": "Webhooks"
+    },
+    {
+      "name": "Demo"
+    }
+  ],
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Secret-free service health",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Current adapter, capabilities, and AI provider status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/state": {
+      "get": {
+        "tags": [
+          "Invoices"
+        ],
+        "summary": "Invoices, summary metrics, and runtime metadata",
+        "operationId": "getState",
+        "responses": {
+          "200": {
+            "description": "Dashboard state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/insights": {
+      "get": {
+        "tags": [
+          "Insights"
+        ],
+        "summary": "Explainable risk, policy decisions, and payer-adjusted cash forecast",
+        "operationId": "getInsights",
+        "responses": {
+          "200": {
+            "description": "Per-invoice insights and projections",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Insights"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/policy": {
+      "get": {
+        "tags": [
+          "Insights"
+        ],
+        "summary": "Collections policy plus the decision ledger",
+        "operationId": "getPolicy",
+        "responses": {
+          "200": {
+            "description": "Policy as data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "policy": {
+                      "$ref": "#/components/schemas/Policy"
+                    },
+                    "decisions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PolicyDecision"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/audit": {
+      "get": {
+        "tags": [
+          "Insights"
+        ],
+        "summary": "Verify the SHA-256 hash chain on every invoice timeline",
+        "operationId": "verifyAudit",
+        "responses": {
+          "200": {
+            "description": "Chain verification result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/parse-invoice": {
+      "post": {
+        "tags": [
+          "Invoices"
+        ],
+        "summary": "Turn natural language into a validated, editable invoice draft",
+        "operationId": "parseInvoice",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 8000,
+                    "example": "Invoice Acme Design Co <accounts@acme.example> for 2 brand review sessions at $125 each, tax 8%, due in 15 days"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Draft plus AI provenance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "invoice": {
+                      "$ref": "#/components/schemas/InvoiceDraft"
+                    },
+                    "ai": {
+                      "$ref": "#/components/schemas/AIProvenance"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/invoices": {
+      "post": {
+        "tags": [
+          "Invoices"
+        ],
+        "summary": "Create a validated draft invoice",
+        "operationId": "createInvoice",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvoiceInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "invoice": {
+                      "$ref": "#/components/schemas/Invoice"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/invoices/{id}/send": {
+      "post": {
+        "tags": [
+          "Invoices"
+        ],
+        "summary": "Create and send the invoice through the configured PayPal adapter",
+        "operationId": "sendInvoice",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/InvoiceId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sent invoice with a new audit event",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "invoice": {
+                      "$ref": "#/components/schemas/Invoice"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "502": {
+            "$ref": "#/components/responses/PayPalError"
+          }
+        }
+      }
+    },
+    "/api/invoices/{id}/remind": {
+      "post": {
+        "tags": [
+          "Invoices"
+        ],
+        "summary": "Send a PayPal invoice reminder (policy-gated in the UI)",
+        "operationId": "remindInvoice",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/InvoiceId"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "force": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reminder recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "invoice": {
+                      "$ref": "#/components/schemas/Invoice"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/invoices/{id}/cancel": {
+      "post": {
+        "tags": [
+          "Invoices"
+        ],
+        "summary": "Cancel a draft or sent invoice, including the PayPal invoice",
+        "operationId": "cancelInvoice",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/InvoiceId"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 300
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cancelled invoice",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "invoice": {
+                      "$ref": "#/components/schemas/Invoice"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/invoices/{id}/payment-link": {
+      "post": {
+        "tags": [
+          "Checkout"
+        ],
+        "summary": "Create (or reuse) a PayPal Checkout order and hosted payment link",
+        "operationId": "createPaymentLink",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/InvoiceId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order plus the customer-facing pay URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "order": {
+                      "$ref": "#/components/schemas/CheckoutOrder"
+                    },
+                    "payUrl": {
+                      "type": "string",
+                      "example": "/pay/tZeh5PiOXz9G9KSZuJ3u-CA4"
+                    },
+                    "invoice": {
+                      "$ref": "#/components/schemas/Invoice"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/copilot/plan": {
+      "post": {
+        "tags": [
+          "Copilot"
+        ],
+        "summary": "Ask the agent for an explainable, approvable plan",
+        "operationId": "planWithCopilot",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "message"
+                ],
+                "properties": {
+                  "message": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "example": "Who should I chase today?"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Answer plus proposed steps; nothing has executed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/copilot/execute": {
+      "post": {
+        "tags": [
+          "Copilot"
+        ],
+        "summary": "Execute only the approved steps of an unexpired plan",
+        "operationId": "executePlan",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "planId",
+                  "stepIds"
+                ],
+                "properties": {
+                  "planId": {
+                    "type": "string"
+                  },
+                  "stepIds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-step execution results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "planId": {
+                      "type": "string"
+                    },
+                    "executed": {
+                      "type": "integer"
+                    },
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/StepResult"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/pay/{token}": {
+      "get": {
+        "tags": [
+          "Checkout"
+        ],
+        "summary": "Public, customer-safe view of an invoice payment link",
+        "operationId": "getPayPage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PayToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public invoice projection and checkout mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "invoice": {
+                      "$ref": "#/components/schemas/PublicInvoice"
+                    },
+                    "merchant": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "checkout": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "mock": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/pay/{token}/order": {
+      "post": {
+        "tags": [
+          "Checkout"
+        ],
+        "summary": "Create (or reuse) the PayPal order for this payment link",
+        "operationId": "createPayOrder",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PayToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order id and optional PayPal approval URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "order": {
+                      "$ref": "#/components/schemas/CheckoutOrder"
+                    },
+                    "invoice": {
+                      "$ref": "#/components/schemas/PublicInvoice"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pay/{token}/capture": {
+      "post": {
+        "tags": [
+          "Checkout"
+        ],
+        "summary": "Capture the approved order and mark the invoice paid",
+        "operationId": "capturePayOrder",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PayToken"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "orderId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Paid invoice; duplicate captures are idempotent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "invoice": {
+                      "$ref": "#/components/schemas/PublicInvoice"
+                    },
+                    "duplicate": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/webhooks/simulate": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Demo-safe invoice event replay (explicitly simulated)",
+        "operationId": "simulateWebhook",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "eventType",
+                  "invoiceId"
+                ],
+                "properties": {
+                  "eventType": {
+                    "type": "string",
+                    "enum": [
+                      "INVOICING.INVOICE.SENT",
+                      "INVOICING.INVOICE.PAID",
+                      "INVOICING.INVOICE.CANCELLED",
+                      "INVOICING.INVOICE.VOIDED",
+                      "INVOICING.INVOICE.REFUNDED"
+                    ]
+                  },
+                  "invoiceId": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string",
+                    "description": "Optional event id used for idempotency"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Event accepted, deduplicated, or ignored as stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean"
+                    },
+                    "duplicate": {
+                      "type": "boolean"
+                    },
+                    "stale": {
+                      "type": "boolean"
+                    },
+                    "invoice": {
+                      "$ref": "#/components/schemas/Invoice"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/webhooks/paypal": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Receive a PayPal webhook after signature verification",
+        "description": "Forwards the event to PayPal's `/v1/notifications/verify-webhook-signature`\nendpoint. Requires `PAYPAL_WEBHOOK_ID`, the five `PAYPAL-*` signature\nheaders, and a sandbox adapter. The cert URL is restricted to PayPal hosts.\n",
+        "operationId": "receivePayPalWebhook",
+        "parameters": [
+          {
+            "name": "PAYPAL-TRANSMISSION-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "PAYPAL-TRANSMISSION-TIME",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "PAYPAL-CERT-URL",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            }
+          },
+          {
+            "name": "PAYPAL-AUTH-ALGO",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "PAYPAL-TRANSMISSION-SIG",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "event_type"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "event_type": {
+                    "type": "string"
+                  },
+                  "resource": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Verified event applied, deduplicated, or acknowledged as unsupported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean"
+                    },
+                    "duplicate": {
+                      "type": "boolean"
+                    },
+                    "ignored": {
+                      "type": "boolean"
+                    },
+                    "invoice": {
+                      "$ref": "#/components/schemas/Invoice"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/demo/reset": {
+      "post": {
+        "tags": [
+          "Demo"
+        ],
+        "summary": "Reset the demo to freshly seeded, relative-dated invoices",
+        "operationId": "resetDemo",
+        "responses": {
+          "200": {
+            "description": "Fresh state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "InvoiceId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        }
+      },
+      "PayToken": {
+        "name": "token",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 128
+        }
+      }
+    },
+    "responses": {
+      "ValidationError": {
+        "description": "The request failed validation",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "The invoice or payment link was not found",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Signature verification or demo token failed",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "PayPalError": {
+        "description": "PayPal rejected the request",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "example": "VALIDATION_ERROR"
+              },
+              "message": {
+                "type": "string"
+              },
+              "details": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      },
+      "AIProvenance": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "deterministic",
+              "openai",
+              "xai",
+              "gemini",
+              "ollama"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "ai",
+              "deterministic"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fallback": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "InvoiceItem": {
+        "type": "object",
+        "required": [
+          "description",
+          "quantity",
+          "unitPrice"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "quantity": {
+            "type": "number",
+            "minimum": 0.01
+          },
+          "unitPrice": {
+            "type": "number",
+            "minimum": 0
+          },
+          "amount": {
+            "type": "number",
+            "readOnly": true
+          }
+        }
+      },
+      "InvoiceInput": {
+        "type": "object",
+        "required": [
+          "customer",
+          "items"
+        ],
+        "properties": {
+          "customer": {
+            "type": "object",
+            "required": [
+              "name",
+              "email"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "email": {
+                "type": "string",
+                "format": "email"
+              }
+            }
+          },
+          "currency": {
+            "type": "string",
+            "default": "USD",
+            "pattern": "^[A-Z]{3}$"
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/InvoiceItem"
+            }
+          },
+          "taxRate": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "default": 0
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "reference": {
+            "type": "string",
+            "maxLength": 120
+          }
+        }
+      },
+      "InvoiceDraft": {
+        "type": "object",
+        "properties": {
+          "customer": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string",
+                "format": "email"
+              }
+            }
+          },
+          "currency": {
+            "type": "string"
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InvoiceItem"
+            }
+          },
+          "subtotal": {
+            "type": "number"
+          },
+          "taxRate": {
+            "type": "number"
+          },
+          "tax": {
+            "type": "number"
+          },
+          "total": {
+            "type": "number"
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Invoice": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/InvoiceDraft"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "DRAFT",
+                  "SENT",
+                  "PAID",
+                  "CANCELLED",
+                  "VOID",
+                  "REFUNDED"
+                ]
+              },
+              "payToken": {
+                "type": "string",
+                "description": "Unguessable customer payment-link token"
+              },
+              "paypalInvoiceId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "paypalOrderId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "orderStatus": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reminderCount": {
+                "type": "integer"
+              },
+              "lastRemindedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "paidAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "paymentReference": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "updatedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "events": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AuditEvent"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "PublicInvoice": {
+        "type": "object",
+        "description": "Customer-safe projection; excludes PayPal ids and the audit trail.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "customer": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          "currency": {
+            "type": "string"
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InvoiceItem"
+            }
+          },
+          "subtotal": {
+            "type": "number"
+          },
+          "taxRate": {
+            "type": "number"
+          },
+          "tax": {
+            "type": "number"
+          },
+          "total": {
+            "type": "number"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "SENT",
+              "PAID",
+              "CANCELLED",
+              "VOID",
+              "REFUNDED"
+            ]
+          },
+          "paidAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "paymentReference": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "AuditEvent": {
+        "type": "object",
+        "required": [
+          "type",
+          "at",
+          "hash",
+          "prevHash"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "eventId": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "prevHash": {
+            "type": "string"
+          },
+          "hash": {
+            "type": "string",
+            "description": "SHA-256 over the previous hash plus the canonical event"
+          }
+        }
+      },
+      "AuditReport": {
+        "type": "object",
+        "properties": {
+          "valid": {
+            "type": "boolean"
+          },
+          "checkedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "invoiceCount": {
+            "type": "integer"
+          },
+          "checkedEvents": {
+            "type": "integer"
+          },
+          "failures": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "Policy": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "reminders": {
+            "type": "object",
+            "properties": {
+              "minDaysOverdue": {
+                "type": "number"
+              },
+              "cooldownHours": {
+                "type": "number"
+              },
+              "maxReminders": {
+                "type": "number"
+              },
+              "minAmount": {
+                "type": "number"
+              },
+              "escalateAfterReminders": {
+                "type": "number"
+              }
+            }
+          },
+          "sending": {
+            "type": "object",
+            "properties": {
+              "requireApproval": {
+                "type": "boolean"
+              },
+              "maxInvoiceTotal": {
+                "type": "number"
+              }
+            }
+          },
+          "writeOff": {
+            "type": "object",
+            "properties": {
+              "afterDaysOverdue": {
+                "type": "number"
+              },
+              "maxAmount": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "PolicyDecision": {
+        "type": "object",
+        "properties": {
+          "invoiceId": {
+            "type": "string"
+          },
+          "customer": {
+            "type": "string"
+          },
+          "ruleId": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
+          },
+          "allowed": {
+            "type": "boolean"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "wait",
+              "skip",
+              "escalate"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "inputs": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "Insight": {
+        "type": "object",
+        "properties": {
+          "invoiceId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "daysUntilDue": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "daysOverdue": {
+            "type": "integer"
+          },
+          "risk": {
+            "type": "string",
+            "enum": [
+              "LOW",
+              "MEDIUM",
+              "HIGH",
+              "CRITICAL"
+            ]
+          },
+          "riskScore": {
+            "type": "integer"
+          },
+          "urgency": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "reasonCodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "explanation": {
+            "type": "string"
+          },
+          "expectedPaymentDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "expectedDaysFromNow": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "forecastBasis": {
+            "type": "string",
+            "enum": [
+              "payer_median_lateness",
+              "portfolio_median_lateness",
+              "due_date",
+              "no_due_date"
+            ]
+          },
+          "forecastConfidence": {
+            "type": "number"
+          },
+          "payerMedianLatenessDays": {
+            "type": "number"
+          },
+          "payerPaidCount": {
+            "type": "integer"
+          },
+          "policy": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "nextAction": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "priority": {
+                "type": "integer"
+              },
+              "label": {
+                "type": "string"
+              },
+              "requiresApproval": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "Insights": {
+        "type": "object",
+        "properties": {
+          "asOf": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "invoices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Insight"
+            }
+          },
+          "recommendations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Insight"
+            }
+          },
+          "expectedCashPosition": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number"
+              }
+            }
+          },
+          "summary": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "policyDecisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PolicyDecision"
+            }
+          }
+        }
+      },
+      "State": {
+        "type": "object",
+        "properties": {
+          "invoices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Invoice"
+            }
+          },
+          "summary": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "adapter": {
+            "type": "string",
+            "enum": [
+              "mock",
+              "paypal-sandbox"
+            ]
+          },
+          "persisted": {
+            "type": "boolean"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/Policy"
+          },
+          "meta": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "adapter": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "mock",
+              "sandbox"
+            ]
+          },
+          "uptime": {
+            "type": "number"
+          },
+          "serverTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            }
+          },
+          "ai": {
+            "$ref": "#/components/schemas/AIProvenance"
+          }
+        }
+      },
+      "CheckoutOrder": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "approveUrl": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri",
+            "description": "PayPal approval link; null in mock mode"
+          },
+          "mock": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PlanStep": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "remind_invoice",
+              "send_invoice",
+              "cancel_invoice",
+              "create_payment_link",
+              "draft_invoice"
+            ]
+          },
+          "invoiceId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "requiresApproval": {
+            "type": "boolean"
+          },
+          "execution": {
+            "type": "string",
+            "enum": [
+              "server",
+              "client"
+            ]
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "Plan": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "intent": {
+            "type": "string"
+          },
+          "answer": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanStep"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "integer"
+          },
+          "ai": {
+            "$ref": "#/components/schemas/AIProvenance"
+          }
+        }
+      },
+      "StepResult": {
+        "type": "object",
+        "properties": {
+          "stepId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "executed",
+              "failed",
+              "skipped",
+              "client_action"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "invoice": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "order": {
+            "$ref": "#/components/schemas/CheckoutOrder"
+          },
+          "payUrl": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

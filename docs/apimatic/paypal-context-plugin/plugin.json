@@ -1,0 +1,19 @@
+{
+  "name": "paypal",
+  "displayName": "PayPal",
+  "version": "0.1.0",
+  "description": "Integrate and consume the APIMatic-generated PayPal Server SDK SDK — bundled skills for csharp, java, php, Python, ruby, TypeScript.",
+  "author": {
+    "name": "PayPal Server SDKs",
+    "email": "ppcp-server-sdks@paypal.com"
+  },
+  "license": "MIT",
+  "skills": [
+    "./skills/csharp",
+    "./skills/java",
+    "./skills/php",
+    "./skills/python",
+    "./skills/ruby",
+    "./skills/typescript"
+  ]
+}

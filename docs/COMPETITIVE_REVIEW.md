@@ -1,84 +1,95 @@
-# Competitive review: is Cashflow Copilot a winning project?
+# Competitive review
 
 ## Honest verdict
 
-After the upgrade, Cashflow Copilot is **a credible finalist-level MVP and a strong platform for a winning submission**, but it is not automatically a winning project yet. The product now has a differentiated wedge: it does not stop at AI-generated invoice text. It owns a controlled financial loop:
+Cashflow Copilot is a **credible finalist-level submission** with a defensible
+wedge, not an automatic win. The AR/invoicing cluster in this hackathon is the
+most contested one, and several public submissions already have working sandbox
+runs, hundreds of tests, and hosted demos.
 
-```text
-natural-language intent
-        ↓
-structured, editable proposal
-        ↓  human approval gate
-PayPal invoice / reminder action
-        ↓
-verified PayPal event
-        ↓
-explainable cashflow forecast + prioritized next action
-```
+What this project has that most do not:
 
-That closed loop is materially stronger than a generic “chat with PayPal” demo or a dashboard with an LLM bolted on. The remaining work is mostly evidence and presentation: prove the live PayPal path, prove the AI provider path, host it, and show the product solving a real merchant moment in under three minutes.
+1. A **quantified forecast** with a committed backtest and two baselines, not a
+   chart with a confidence label.
+2. **Policy as data** with the exact rule id and numeric inputs attached to every
+   recommendation.
+3. A **hash-chained audit trail** the judge can verify from the UI or API.
+4. **Two-sided PayPal**: Invoicing for the merchant, Orders/Checkout for the
+   customer, meeting at a verified capture.
+5. A **real approval gate** for agent actions, with server-side validation of
+   model-proposed tools and invoice ids.
 
-## Updated judge-readiness score
+What it does not have yet:
 
-Scores are directional, not a promise of placement. They assume the manual launch checklist below is completed.
+- A committed **real sandbox evidence** file (the script exists; the credentials
+  are the owner's).
+- A hosted demo that has been recorded end-to-end.
+- A recorded video.
 
-| Judging dimension | Before upgrade | Current MVP | What earns the final points |
-| --- | ---: | ---: | --- |
-| Technical implementation | 6/10 | 8/10 | Live Sandbox invoice + reminder + verified webhook, plus OpenAI-compatible extraction |
-| Design | 7/10 | 9/10 | Command center, queue, forecast, drawer audit trail, clear approval language |
-| Potential impact | 7/10 | 8/10 | Show a concrete freelancer/SMB cash-collection story and measurable time saved |
-| Innovation | 5/10 | 8/10 | Position it as a **closed-loop cashflow operator**, not an invoice generator |
-| Presentation | 6/10 | 8/10 | A rehearsed 150–180 second story with one visible PayPal event and one human decision |
+Those are owner-only steps, documented in [`FINAL_HANDOFF.md`](FINAL_HANDOFF.md).
 
-## Why it can stand out
+## Direct competition observed
 
-1. **The AI has a consequential but bounded job.** It extracts intent, ranks risk, explains evidence, and proposes an action. It does not silently send money or invent a recipient.
-2. **PayPal is central.** Invoicing v2 is used for create/send/remind, and the production-shaped webhook path asks PayPal to verify event authenticity before updating state.
-3. **The output is a decision, not a paragraph.** The Copilot queue says what to do next, why, how urgent it is, and how confident the signal is.
-4. **The demo has a visible before/after.** A sent overdue invoice becomes a reminder action; a payment event changes the forecast and queue.
-5. **The trust model is judge-readable.** Review, approval, PayPal processing, and the audit timeline are separate product moments.
+These are public submissions found while researching the hackathon. They are
+listed to keep the positioning honest, not to disparage them.
 
-## Remaining competitive risks
+| Project | What it does | Why it is strong | Our response |
+| --- | --- | --- | --- |
+| [Chaser](https://devpost.com/software/chaser-bc5tv6) | AR agent for PayPal sellers with a reconciliation benchmark, promise-to-pay, disputes, write-off policy | Real sandbox run, labelled 71-transaction benchmark, explicit live-vs-demo table | We add payer-aware **payment-date forecasting** and a **hash-chained audit**; both are measurable |
+| [Kioku × PayPal](https://devpost.com/software/kioku-x-paypal) | Bills from a sentence, reminders, "who owes me?", model-claim verification, 248 tests | Very high test count and a resettable hosted demo | We match the approval/verification story and add checkout + forecast evidence |
+| [ClearDue](https://devpost.com/software/cleardue-kqj2ht) | Dispute resolution on existing PayPal invoices with source-linked evidence | Real sandbox money movement (£1,250 → £1,000 → paid) | Different job: collection before dispute. Our checkout closes the payment loop |
+| [OFFSET](https://devpost.com/software/offset-jrg3p6) | Circular debt netting for SMB supply chains | Genuinely novel, property-tested net positions | We do not compete on netting; we compete on the single-merchant collection loop |
+| [ScopePay](https://devpost.com/software/scopepay) | Scope-vs-request change orders → PayPal invoice | Clean single workflow, verified sandbox PAID | Broader AR loop and a forecast, not just change orders |
+| [Reckon](https://devpost.com/software/reckon-0wn2bd) | Almost the same pitch, written in future tense with no verified run | — | **Cautionary example:** evidence beats narrative. We ship the runnable build and tests |
 
-- **AI authenticity risk:** mock mode uses a deterministic parser. For judging, configure an OpenAI-compatible provider and capture the real structured extraction path in the demo. Keep deterministic fallback enabled for resilience.
-- **Sandbox credibility risk:** a simulated webhook is not proof of a PayPal event. Complete the verified webhook setup and show the PayPal event ID and verification path, or be explicit that the demo is simulated.
-- **Persistence risk:** state is in memory. This is acceptable for a prototype but must be disclosed; a hosted demo restart resets data.
-- **Forecast interpretation risk:** the forecast is receivables timing, not a bank-balance prediction. The pitch must call it “expected incoming cash from open invoices,” not financial advice or guaranteed cash.
-- **Sponsor risk:** sponsor awards and eligibility can change. Verify the active 2026 sponsor list and submission rules immediately before submission; Postman is an inspectable integration, not a guaranteed award claim.
+## Judging alignment
 
-## Manual launch checklist
+The five criteria are equally weighted, with ties broken by Technological
+Implementation first.
 
-### Required before claiming a live PayPal demo
+| Criterion | Our strongest evidence | Remaining gap |
+| --- | --- | --- |
+| Technological implementation | Invoicing v2 + Orders v2 + verified webhooks, 58 tests, agent allowlist, audit chain, OpenAPI contract | Real sandbox evidence file |
+| Design | Command center, AG Grid ledger, plan cards, invoice control room, hosted pay page, mobile layout | Recorded walkthrough |
+| Potential impact | Named user (small studio), quantified forecast error, time saved on chasing | A real merchant quote or pilot |
+| Innovation | Payer-aware forecast + policy ledger + verifiable audit for an AR agent | Crowded cluster; needs a crisp first sentence |
+| Presentation | Scripted 2:40 video, live-vs-demo table, reproducible numbers | The video itself |
 
-- [ ] Create/sign into a PayPal Developer account.
-- [ ] Create a Sandbox REST app and copy the client ID and secret.
-- [ ] Create a sandbox business account and a test buyer/payer as required by the active PayPal flow.
-- [ ] Set `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` locally or as deployment secrets.
-- [ ] Run one real invoice create/send/remind flow against PayPal Sandbox.
-- [ ] Create a PayPal webhook subscription for invoice events and set its HTTPS URL to `/api/webhooks/paypal`.
-- [ ] Set the returned webhook ID as `PAYPAL_WEBHOOK_ID`.
-- [ ] Use a public HTTPS deployment or tunnel; PayPal cannot call `localhost`.
-- [ ] Confirm the app rejects missing or invalid PayPal signature headers.
-- [ ] Confirm a verified event appears in the invoice timeline exactly once.
+## Remaining risks
 
-### Required before claiming an AI-powered demo
+1. **Evidence gap.** A judge may see "mock demo" and discount the PayPal claims.
+   Mitigation: run `npm run sandbox:check`, commit the evidence, and record the
+   sandbox path.
+2. **Crowded cluster.** "AI AR for freelancers" is the most contested idea.
+   Mitigation: lead with the forecast number and the approval/audit guarantees,
+   not "AI invoice generator."
+3. **No React / AG Studio.** The AG Grid sponsor prize is oriented toward AG
+   Studio. Mitigation: the Community grid is a real, visible integration; we do
+   not claim an AG Studio entry.
+4. **Prototype boundaries.** In-memory state, per-process rate limits, synthetic
+   seed data. Mitigation: disclosed in the README, optional persistence, and a
+   clear production roadmap.
+5. **Video dependency.** Judges are not required to run the project. Mitigation:
+   record early, upload early, and keep the first 15 seconds on the money moment.
 
-- [ ] Set `OPENAI_API_KEY`, or configure another OpenAI-compatible provider with `OPENAI_BASE_URL` and `OPENAI_MODEL`.
-- [ ] Run at least five varied prompts: multiple items, tax, relative due date, missing optional note, and a malformed/ambiguous request.
-- [ ] Verify every AI result is editable and validated before sending.
-- [ ] Confirm provider failures fall back to deterministic parsing without exposing secrets or provider responses.
+## Suggested score estimate
 
-### Required before submission
+Assuming the sandbox evidence and video are completed and the hosted demo is
+warm:
 
-- [ ] Deploy a public HTTPS demo and test it from a clean browser.
-- [ ] Keep the public GitHub repository and MIT license visible.
-- [ ] Add a short architecture diagram and a real API/event sequence to the write-up.
-- [ ] Record a sub-three-minute video: problem → intent → review → PayPal action → event → forecast change.
-- [ ] State clearly which steps are live Sandbox and which are deterministic demo mode.
-- [ ] Verify the final Devpost deadline, required fields, sponsor rules, and judging language on the live challenge page.
+| Dimension | Estimate | Why |
+| --- | ---: | --- |
+| Technological implementation | 8.5/10 | Three PayPal surfaces, verified events, agent validation, tests, audit |
+| Design | 9/10 | Coherent product, not a technical demo; real customer page |
+| Potential impact | 8/10 | Specific user, quantified error reduction, clear workflow |
+| Innovation | 8/10 | Forecast + policy + verifiable audit; not a generic invoice generator |
+| Presentation | 8.5/10 | Scripted, honest, evidence-first |
+| **Overall** | **~8.4/10** | Finalist-level; placement depends on the field and the video |
 
-## Recommended final pitch
+## The one-sentence position
 
-> Small businesses do not fail because they cannot write invoices. They lose momentum because they do not know which payment deserves attention next. Cashflow Copilot turns a sentence into a reviewable PayPal action, then turns PayPal's verified payment events into a calm, explainable cash-collection plan.
+> Cashflow Copilot is the AR agent that predicts when you will actually get paid,
+> explains the one action that moves cash this week, and cannot move money
+> without your approval — with a hash-chained receipt for every step.
 
-Do not pitch this as “an AI invoice generator.” Pitch it as **a human-controlled cashflow operator built on PayPal's payment and event infrastructure**.
+Do not pitch it as "an AI invoice generator."

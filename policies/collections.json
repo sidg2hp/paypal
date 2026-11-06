@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "description": "Default collections policy for Cashflow Copilot. Every reminder recommendation records the rule that allowed or blocked it.",
+  "reminders": {
+    "minDaysOverdue": 1,
+    "cooldownHours": 0,
+    "maxReminders": 3,
+    "minAmount": 0,
+    "escalateAfterReminders": 2
+  },
+  "sending": {
+    "requireApproval": true,
+    "maxInvoiceTotal": 100000
+  },
+  "writeOff": {
+    "afterDaysOverdue": 90,
+    "maxAmount": 500
+  }
+}

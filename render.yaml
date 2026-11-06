@@ -1,0 +1,51 @@
+# Render Blueprint for Cashflow Copilot.
+# Deploy: Render Dashboard -> New -> Blueprint -> connect this repository.
+# The app runs in mock mode with no secrets, so the demo is interactive
+# immediately. Add PayPal Sandbox credentials to switch to the live adapter.
+services:
+  - type: web
+    name: cashflow-copilot
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm ci --omit=dev
+    startCommand: node src/server.js
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      # Trust Render's proxy headers so request-derived return URLs and the
+      # per-IP rate limiter see the real client.
+      - key: TRUST_PROXY
+        value: "1"
+      - key: AI_PROVIDER
+        value: auto
+      # Optional: set these in the Render dashboard to use PayPal Sandbox.
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      # Set this to protect the demo reset button on a public deployment.
+      - key: DEMO_RESET_SECRET
+        generateValue: true
+      # Optional AI providers (auto order: OpenAI, xAI, Gemini, then local Ollama).
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: XAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+    # Free instances have an ephemeral filesystem and cannot mount a disk.
+    # For durable state, upgrade the plan, uncomment the disk below, and add
+    # DATA_FILE=/var/data/store.json to envVars.
+    # disk:
+    #   name: cashflow-data
+    #   mountPath: /var/data
+    #   sizeGB: 1

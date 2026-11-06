@@ -4,3 +4,6 @@ node_modules/
 !.env.example
 .opencode/
 paypal1.pdf
+data/
+.tmp-*
+*.log

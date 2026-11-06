@@ -1,0 +1,12 @@
+{
+  "$schema": "https://titan.apimatic.io/api/build/schema",
+  "buildFileVersion": "1",
+  "generatePortal": {
+    "apiSpecs": [
+      "openapi"
+    ],
+    "languageConfig": {
+      "http": {}
+    }
+  }
+}

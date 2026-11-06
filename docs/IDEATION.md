@@ -1,60 +1,84 @@
-# Cashflow Copilot: hackathon thesis
+# Product thesis
 
-## Recommendation
+## The problem
 
-Build **Cashflow Copilot**, a trust-first AI accounts-receivable operator for freelancers and small businesses:
+For a freelancer or small studio, accounts receivable is not an invoicing problem.
+It is an attention problem:
 
-> “Say what needs to get paid. Review it. Let PayPal make it real.”
+- Which invoice is actually late versus merely not paid yet?
+- Which client habitually pays 12 days after the due date?
+- Which reminder is allowed by my own policy, and which is nagging?
+- Did the payment actually arrive, or did I mark it paid because a client said so?
 
-The first workflow turns a natural-language request into an editable PayPal invoice, sends it after explicit approval, and reacts to payment events with a next-best action. This is a sharper version of the PDF's “AI Invoice & Expense Manager” than a generic invoice writer: the product owns the complete **intent → review → PayPal action → event → follow-up** loop.
+Existing tools answer one slice: invoicing software sends invoices, dashboards
+show totals, and generic AI chat can write text. None of them owns the loop from
+**intent → validated action → PayPal execution → verified outcome**, with the
+human in the middle.
 
-## Why this beats a generic shopping chatbot
+## The product
 
-| Direction | Technical implementation | Demo reliability | Differentiation | Main risk |
-| --- | ---: | ---: | ---: | --- |
-| Conversational shopping | High | Medium | High | Agentic-commerce access and checkout approval dependencies |
-| Fraud alert bot | High | Low | Medium | No credible labeled data or real-time signals in a short build |
-| Split-payment agent | Very high | Low | High | Partner onboarding and multi-party account setup |
-| **Cashflow Copilot** | **High** | **High** | **High when event-driven** | Invoicing permissions and sandbox email behavior |
+Cashflow Copilot is an accounts-receivable operator for a small merchant:
 
-The winning wedge is not “AI writes an invoice.” It is **AI proposes a safe financial action, PayPal executes it, and the copilot explains what changed**. The human review gate is a product feature: it prevents hallucinated amounts, recipients, or dates from becoming financial actions.
+1. The merchant describes work in natural language.
+2. An AI extractor produces a validated, editable invoice proposal; the server
+   recalculates all totals.
+3. The merchant approves and PayPal Invoicing sends it.
+4. The copilot ranks the invoices that need attention, explains why, applies the
+   merchant's collections policy, and predicts when each one will actually be paid
+   from that payer's history.
+5. The merchant approves specific actions; the agent executes only those.
+6. PayPal webhooks and checkout captures close the loop; every event is
+   hash-chained.
 
-## Evidence used
+The customer side is a hosted page where the invoice can be paid with PayPal
+Checkout, so the product is two-sided rather than merchant-only.
 
-- The supplied hackathon brief emphasizes meaningful PayPal technology + AI, a working prototype, open-source code, documentation, live/demo readiness, and judging across technical implementation, design, impact, innovation, and presentation.
-- PayPal REST APIs use OAuth 2.0 and provide sandbox accounts: <https://developer.paypal.com/api/rest/>
-- Invoices v2 provides create draft, send, remind, cancel, record payment, QR code, search, and recurring-invoice endpoints: <https://developer.paypal.com/api/invoicing/v2/>
-- PayPal Webhooks supports registration, signature verification, event lookup, and simulated events: <https://developer.paypal.com/api/webhooks/v1/>
-- PayPal's 2026 agentic-commerce documentation says access requires an onboarding request, so it is a future extension rather than a critical MVP dependency: <https://docs.paypal.ai/growth/agentic-commerce/overview>
-- PayPal's WebMCP guidance reinforces that agents can prepare discovery/cart/checkout while buyers stay in control of sign-in, funding choice, review, and approval: <https://developer.paypal.com/community/blog/WebMCP_PayPal_Agent_Ready>
+## Why this is the right wedge
 
-## MVP acceptance criteria
+| Direction | Why not |
+| --- | --- |
+| Conversational shopping | Buyer-side agentic commerce is exciting but the hackathon's PayPal access for agentic checkout is onboarding-gated, and the demo risk is high |
+| Fraud detection | Needs labeled data and real transaction streams; a short build cannot produce credible evidence |
+| Split payments / marketplace payouts | High partner-onboarding and multi-account setup risk |
+| **Accounts receivable** | Real pain, PayPal Invoicing is available today, events are verifiable, and the workflow is demoable end-to-end in under three minutes |
 
-1. A judge can open the app with no credentials and see a credible merchant dashboard with seeded data.
-2. A judge can type an invoice request and receive structured customer, line items, due date, tax, and total.
-3. The draft is editable and cannot be sent without an explicit review/approval action.
-4. Send creates a PayPal invoice through the mock adapter offline, or the sandbox Invoicing API when credentials are configured.
-5. A payment webhook can be simulated and the dashboard updates from SENT to PAID with a clear explanation.
-6. The demo exposes a ready-to-import Postman collection for PayPal OAuth, invoice create/send, and webhook simulation.
-7. `npm test`, `npm run check`, and `docker build` are reproducible without a network dependency for the test path.
+The differentiator is not "AI writes an invoice." It is **a bounded financial
+agent with a measurable forecast and a verifiable audit trail**.
 
-## Three-minute judge narrative
+## Design principles
 
-1. Start with two overdue-looking signals: “$575 outstanding” and “1 invoice needs attention.”
-2. Say: “Invoice Acme Design Co for two brand review sessions at $125 each, 8% tax, due in 15 days.”
-3. Show the AI extraction and calculation explanation; edit the due date if desired.
-4. Click **Approve & send with PayPal**. The activity rail shows `POST /v2/invoicing/invoices` and `/send` in sandbox/mock mode.
-5. Simulate `INVOICING.INVOICE.PAID`. The invoice flips to PAID and the copilot says: “Close the loop: mark the work complete and move $270 into your cash buffer.”
-6. End on the trust boundary: the AI can prepare and explain; the human approves the financial action; PayPal owns payment processing.
+1. **The model proposes; the human approves.** No invoice, reminder, cancellation,
+   or payment link is created without an explicit action.
+2. **Money arithmetic is code, not model output.** Every total is recalculated in
+   integer cents on the server.
+3. **Policy is data.** Reminder limits, cooldowns, and send caps live in a JSON
+   file the merchant can read and change.
+4. **Every claim has a source.** Event provenance distinguishes seed, simulated,
+   PayPal, verified webhook, and Copilot-approved actions.
+5. **Evidence over adjectives.** Tests, a committed backtest, an OpenAPI
+   contract, and a live-vs-demo table.
+6. **The demo must run with zero credentials.** The deterministic path is a
+   first-class product, not a fallback afterthought.
 
-## Sponsor strategy
+## What is deliberately out of scope
 
-Use **Postman** as a practical sponsor integration, not a logo: the repository ships a runnable collection with environment variables and example requests for the PayPal API surface. The collection makes the integration inspectable for judges and doubles as the team's API test harness. If the active sponsor list changes, Postman remains optional and the product still works without it.
+- Multi-tenant auth and roles (a prototype boundary, disclosed).
+- Production durable storage (optional JSON persistence is provided).
+- Tax filing, accounting reconciliation, and bank feeds.
+- Fully autonomous collection without approval.
+- AP2/verifiable-credential implementation (the trust loop is aligned; the
+  protocol is not implemented).
 
-## Post-MVP extensions
+## Success criteria (met)
 
-- PayPal Webhook signature verification and live event registration.
-- Invoice reminders and “who needs attention this week?” prioritization.
-- OpenAI-compatible structured extraction behind the existing offline parser seam.
-- PayPal QR-code invoice sharing and recurring invoices.
-- Agentic-commerce handoff once merchant access is available; never bypass buyer approval.
+- [x] Runs offline with no keys and a credible seeded merchant dashboard.
+- [x] Natural language becomes a validated, editable invoice.
+- [x] Send/remind/cancel through mock and PayPal Sandbox adapters.
+- [x] Verified webhook path with idempotency and stale-event protection.
+- [x] Explainable risk, policy decisions, and payer-adjusted forecast.
+- [x] Agent plan with per-step approval and allowlisted tools.
+- [x] Hosted customer pay page with PayPal Checkout.
+- [x] Hash-chained audit trail.
+- [x] 58 offline tests, 16 golden evaluation cases, a reproducible backtest.
+- [x] OpenAPI contract, APIMatic build directory, Render Blueprint, Dockerfile,
+      Postman collection.

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#071b31">
+  <meta name="robots" content="noindex">
+  <title>Pay invoice — Cashflow Copilot</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/pay.css">
+  <script src="/pay.js" defer></script>
+</head>
+<body class="pay-body">
+  <main class="pay-shell">
+    <header class="pay-header">
+      <a class="pay-brand" href="/" aria-label="Cashflow Copilot home"><span class="brand-mark"><span></span><span></span></span><span><strong>cashflow</strong><small>copilot</small></span></a>
+      <span class="pay-secure"><span class="lock">⌑</span> Secure PayPal checkout</span>
+    </header>
+
+    <section class="pay-card" id="pay-card" aria-live="polite">
+      <div class="pay-loading" id="pay-loading"><span class="spinner"></span><div><strong>Loading your invoice</strong><p>Checking the payment link with the merchant…</p></div></div>
+      <div id="pay-content" hidden></div>
+    </section>
+
+    <p class="pay-note">Payments are processed by PayPal. Cashflow Copilot never sees or stores card details.</p>
+    <footer class="pay-footer"><span>Powered by PayPal Invoicing + Checkout</span><span id="pay-mode">Checking mode…</span></footer>
+  </main>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

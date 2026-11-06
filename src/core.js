@@ -1,5 +1,10 @@
 'use strict';
 
+const crypto = require('node:crypto');
+const { appendEvent, verifyChain } = require('./audit');
+const { buildPayerStats, forecastInvoice, projectCash } = require('./forecast');
+const { applyPolicyToInsight, loadPolicy } = require('./policy');
+
 const DEFAULT_CURRENCY = 'USD';
 const MAX_BODY_TEXT = 8000;
 const DEFAULT_OUTBOUND_TIMEOUT_MS = 10000;
@@ -29,8 +34,12 @@ const AI_DETECTION_CACHE_TTL_MS = 5000;
 const ollamaDetectionCache = new Map();
 const INVOICE_TRANSITIONS = Object.freeze({
   DRAFT: Object.freeze(['SENT']),
-  SENT: Object.freeze(['PAID', 'CANCELLED', 'VOID'])
+  SENT: Object.freeze(['PAID', 'CANCELLED', 'VOID']),
+  PAID: Object.freeze(['REFUNDED'])
 });
+const INVOICE_STATUSES = Object.freeze(['DRAFT', 'SENT', 'PAID', 'CANCELLED', 'VOID', 'REFUNDED']);
+const CLOSED_STATUSES = Object.freeze(['PAID', 'CANCELLED', 'VOID', 'REFUNDED']);
+const REMINDABLE_STATUSES = Object.freeze(['SENT']);
 
 function normalizeTimeout(value, fallback = DEFAULT_OUTBOUND_TIMEOUT_MS) {
   const timeout = Number(value);
@@ -191,46 +200,156 @@ function calculateTotals(items, taxRate = 0) {
   return { items: normalizedItems, subtotal, taxRate, tax, total: roundCents(subtotal + tax) };
 }
 
+const SUPPORTED_CURRENCIES = Object.freeze(['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'INR', 'SGD', 'NZD', 'CHF', 'SEK', 'NOK', 'DKK', 'PLN', 'BRL', 'MXN', 'HKD', 'ZAR', 'PHP', 'THB', 'AED', 'ILS', 'CZK', 'HUF', 'TRY']);
+const CURRENCY_SYMBOLS = Object.freeze({ '€': 'EUR', '£': 'GBP', '¥': 'JPY', '₹': 'INR', '₩': 'KRW', '₽': 'RUB' });
+const MONTHS = Object.freeze({ january: 0, february: 1, march: 2, april: 3, may: 4, june: 5, july: 6, august: 7, september: 8, october: 9, november: 10, december: 11 });
+
 function extractCurrency(text) {
-  const explicit = text.match(/\b(?:currency\s*[:=]?\s*)?(USD|EUR|GBP|CAD|AUD|JPY)\b/i);
+  const explicit = text.match(/\b(?:currency\s*[:=]?\s*)?(USD|EUR|GBP|CAD|AUD|JPY|INR|SGD|NZD|CHF|SEK|NOK|DKK|PLN|BRL|MXN|HKD|ZAR|PHP|THB|AED|ILS|CZK|HUF|TRY)\b/i);
   if (explicit) return explicit[1].toUpperCase();
-  if (text.includes('€')) return 'EUR';
-  if (text.includes('£')) return 'GBP';
-  if (text.includes('¥')) return 'JPY';
+  for (const [symbol, currency] of Object.entries(CURRENCY_SYMBOLS)) {
+    if (text.includes(symbol)) return currency;
+  }
   return DEFAULT_CURRENCY;
 }
 
+function titleCaseSlug(value) {
+  return value.replace(/[._-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()).trim();
+}
+
+function cleanCustomerName(value) {
+  return String(value || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[<>]/g, ' ')
+    .replace(/\b(?:email|e-mail)\b\s*$/i, ' ')
+    .replace(/^[\s,;:-]+|[\s,;:-]+$/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * Extract the customer from free text. The previous implementation skipped any
+ * line beginning with "invoice", which broke the most common phrasing:
+ * "Invoice Acme Design Co <accounts@acme.example> for ...".
+ */
 function extractCustomer(text) {
   const emailMatch = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   const email = emailMatch ? emailMatch[0].toLowerCase() : null;
   let name = null;
-  const patterns = [
-    /(?:invoice|bill)\s+(?:for|to)\s+([^\n,;<(]+?)(?:\s*<[^>]+>|\s+\S+@\S+)?(?:[,;\n]|$)/i,
-    /(?:customer|client|recipient)\s*[:=-]\s*([^\n,;<(]+?)(?:\s*<[^>]+>|\s+\S+@\S+)?(?:[,;\n]|$)/i,
-    /(?:to)\s*[:=-]\s*([^\n,;<(]+?)(?:\s*<[^>]+>|\s+\S+@\S+)?(?:[,;\n]|$)/i
+
+  // 1. Explicit labels always win.
+  const labelled = [
+    /(?:customer|client|recipient|bill(?:ed)?\s*to)\s*(?:name)?\s*[:=-]\s*([^\n,;<]+)/i,
+    /(?:^|\n)\s*(?:to|for)\s*[:=-]\s*([^\n,;<]+)/i
   ];
-  for (const pattern of patterns) {
+  for (const pattern of labelled) {
     const match = text.match(pattern);
-    if (match) {
-      name = match[1].trim().replace(/\s+(?:email|e-mail)\s*$/i, '').trim();
-      break;
+    if (match && cleanCustomerName(match[1])) { name = cleanCustomerName(match[1]); break; }
+  }
+
+  // 2. Text before the email address, with the invoice header stripped.
+  if (!name && email && emailMatch) {
+    let prefix = text.slice(0, emailMatch.index);
+    prefix = prefix.replace(/^[\s\S]*?(?:^|\n)\s*/m, '');
+    prefix = prefix.replace(/^\s*(?:(?:please|kindly)\s+)?(?:(?:create|make|draft|prepare|send|new|raise)\s+)?(?:an?\s+)?(?:invoice|bill|request)\s*(?:for|to)?\s*/i, '');
+    prefix = prefix.split(/\s+(?:for|covering|due|with|amount|totalling|totaling)\s+/i)[0];
+    prefix = prefix.split(/[,;\n]/)[0];
+    const cleaned = cleanCustomerName(prefix);
+    if (cleaned && !/^(?:me|us|you|the customer)$/i.test(cleaned)) name = cleaned;
+  }
+
+  // 3. "Invoice for Name" / "Bill to Name" without an email.
+  if (!name) {
+    const patterns = [
+      /(?:invoice|bill|request)\s+(?:for|to)\s+([^\n,;<(]+?)(?=\s*(?:for\b|due\b|with\b|amount\b|,|;|$))/i,
+      /(?:[Ii]nvoice|[Bb]ill|[Rr]equest)\s+([A-Z][^\n,;<(]{1,80}?)(?=\s*(?:for\b|due\b|with\b|at\b|,|;|$))/,
+      /\b(?:for|to)\s+([A-Z][^\n,;<(]{1,80}?)(?=\s*(?:for\b|due\b|with\b|at\b|,|;|$))/
+    ];
+    // Let the case-sensitive name patterns run first so "Invoice Globex for"
+    // captures "Globex" instead of the lowercase "for" variant below.
+    const ordered = [patterns[1], patterns[2], patterns[0]];
+    for (const pattern of ordered) {
+      const match = text.match(pattern);
+      if (match && cleanCustomerName(match[1])) { name = cleanCustomerName(match[1]); break; }
     }
   }
-  if (!name && email) {
-    name = email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-  }
+
+  // 4. Last resort: derive a readable name from the email local part.
+  if (!name && email) name = titleCaseSlug(email.split('@')[0]);
   return { name: name || 'Customer', email };
 }
 
+function addUtcDays(baseDate, days) {
+  const due = new Date(baseDate);
+  if (Number.isNaN(due.getTime())) throw new ValidationError('base date must be valid');
+  due.setUTCDate(due.getUTCDate() + days);
+  return due.toISOString().slice(0, 10);
+}
+
 function parseDueDate(text, baseDate = new Date()) {
-  const absolute = text.match(/(?:due|pay(?:able)?\s+by)\s*(?:date)?\s*[:=]?\s*(\d{4}-\d{2}-\d{2})/i);
+  const absolute = text.match(/(?:due|pay(?:able)?\s+by)\s*(?:date|on)?\s*[:=]?\s*(\d{4}-\d{2}-\d{2})/i);
   if (absolute) return validateDate(absolute[1]);
-  const relative = text.match(/due\s+in\s+(\d{1,3})\s+days?/i);
-  if (relative) {
-    const due = new Date(baseDate);
-    if (Number.isNaN(due.getTime())) throw new ValidationError('base date must be valid');
-    due.setUTCDate(due.getUTCDate() + Number(relative[1]));
-    return due.toISOString().slice(0, 10);
+  const relative = text.match(/(?:due|pay(?:able)?)\s*(?:in|within)?\s*(\d{1,3})\s*(days?|weeks?)/i);
+  if (relative) return addUtcDays(baseDate, Number(relative[1]) * (relative[2].toLowerCase().startsWith('week') ? 7 : 1));
+  const net = text.match(/\bnet\s*(\d{1,3})\b/i);
+  if (net) return addUtcDays(baseDate, Number(net[1]));
+  const written = text.match(/(?:due|on)\s*(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{4})/i);
+  if (written) {
+    const month = MONTHS[written[2].toLowerCase()];
+    const iso = `${written[3]}-${String(month + 1).padStart(2, '0')}-${String(written[1]).padStart(2, '0')}`;
+    return validateDate(iso);
+  }
+  return null;
+}
+
+function parseTaxRate(text) {
+  const percentFirst = text.match(/(\d+(?:\.\d+)?)\s*%\s*(?:sales\s+)?tax\b/i);
+  if (percentFirst) return Number(percentFirst[1]);
+  const taxFirst = text.match(/(?:sales\s+)?tax(?:\s+rate)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%/i);
+  if (taxFirst) return Number(taxFirst[1]);
+  const bareTax = text.match(/(?:sales\s+)?tax(?:\s+rate)?\s*[:=]\s*(\d+(?:\.\d+)?)\s*$/im);
+  if (bareTax) return Number(bareTax[1]);
+  return 0;
+}
+
+// A comma only starts a new line item when it is followed by whitespace and a
+// number; this keeps thousands separators such as "2,000" intact.
+const ITEM_SEGMENT_SPLIT = /\s*;\s*|,\s+(?=\d)|(?:\s+and\s+)(?=\d)/i;
+const ITEM_HEADER_PATTERN = /^(?:(?:please\s+)?(?:create|make|draft|prepare|send|new|raise)\s+)?(?:an?\s+)?(?:invoice|bill)\b/i;
+const ITEM_METADATA_PATTERN = /^\s*(?:tax|currency|due|notes?|customer|client|recipient|reference|invoice\s*(?:number|#)?)\b\s*[:=-]/i;
+
+function cleanItemDescription(value) {
+  return String(value || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[,.]\s*$/, '')
+    .replace(/\s+(?:each|apiece)$/i, '')
+    .replace(/\s+per\s+(?:hour|unit|item|session|day)$/i, '')
+    .replace(/^(?:hours?|hrs?|units?|items?|sessions?)\s+(?:of\s+)?/i, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function matchItemSegment(segment) {
+  const candidate = segment
+    .replace(/^\s*[-*•]\s*/, '')
+    .replace(/^\s*(?:for|of|line\s*item\s*\d*\s*[:.-]?)\s+/i, '')
+    .replace(/[\s,;]+$/, '')
+    .trim();
+  if (!candidate || ITEM_METADATA_PATTERN.test(candidate)) return null;
+  const patterns = [
+    /^(\d+(?:\.\d+)?)\s*(?:x|×|units?\s+of)?\s+(.+?)\s+(?:at|@|x|for|each\s+at)\s*[$€£¥₹]?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:each|per\s+[\w/-]+|\/\s*[\w/-]+)?\s*$/i,
+    /^(.+?)\s*[-–—:]\s*(\d+(?:\.\d+)?)\s*(?:x|×)?\s*[$€£¥₹]?\s*([\d,]+(?:\.\d{1,2})?)\s*$/i,
+    /^(\d+(?:\.\d+)?)\s+(.+?)\s+[$€£¥₹]?\s*([\d,]+(?:\.\d{1,2})?)\s*$/i,
+    /^(.+?)\s+[$€£¥₹]?\s*([\d,]+(?:\.\d{1,2})?)\s*$/i
+  ];
+  for (const [index, pattern] of patterns.entries()) {
+    const match = candidate.match(pattern);
+    if (!match) continue;
+    const quantity = index === 0 || index === 2 ? Number(match[1]) : index === 1 ? Number(match[2]) : 1;
+    const description = cleanItemDescription(index === 1 ? match[1] : index === 3 ? match[1] : match[2]);
+    const unitPrice = Number((index === 0 ? match[3] : index === 1 ? match[3] : index === 2 ? match[3] : match[2]).replace(/,/g, ''));
+    if (!description || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice)) continue;
+    return { description, quantity, unitPrice };
   }
   return null;
 }
@@ -238,27 +357,30 @@ function parseDueDate(text, baseDate = new Date()) {
 function parseItems(text) {
   const items = [];
   const lines = text.split(/[\n\r]+/).map((line) => line.trim()).filter(Boolean);
-  const candidates = lines.length > 1 ? lines : text.split(/\s*(?:;|,(?=\s*\d)|\s+and\s+(?=\d))/i).map((part) => part.trim()).filter(Boolean);
+  const keptLines = lines.filter((line) => !ITEM_METADATA_PATTERN.test(line) && !/^\s*(?:email|e-mail)\b\s*[:=]/i.test(line));
+  const candidates = [];
+  if (keptLines.length > 1) {
+    candidates.push(...keptLines);
+  } else {
+    let line = keptLines[0] || text;
+    const metadataCut = line.search(/\s+(?:tax|sales\s+tax|due|notes?|currency|reference)\b\s*[:=]?/i);
+    if (metadataCut > 0) line = line.slice(0, metadataCut);
+    const forMatch = line.match(/\b(?:for|of)\s+(?=\d)/i);
+    if (forMatch) line = line.slice(forMatch.index);
+    else if (ITEM_HEADER_PATTERN.test(line)) line = line.replace(ITEM_HEADER_PATTERN, '').replace(/<[^>]*>/g, ' ');
+    candidates.push(...line.split(ITEM_SEGMENT_SPLIT));
+  }
   for (const candidate of candidates) {
-    if (/^(?:invoice|bill|customer|client|recipient|email|tax|currency|due|notes?)[\s:=-]/i.test(candidate)) continue;
-    let match = candidate.match(/^[-*]?\s*(\d+(?:\.\d+)?)\s*(?:x|×|units?\s+of)?\s+(.+?)\s+(?:at|@|x|each\s+at)\s*[$€£¥]?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:each|per\s+(?:hour|unit)|\/\s*(?:hour|unit))?\s*$/i);
-    if (!match) {
-      match = candidate.match(/^[-*]?\s*(.+?)\s*[-:]\s*(\d+(?:\.\d+)?)\s*(?:x\s*)?[$€£¥]?\s*([\d,]+(?:\.\d{1,2})?)\s*$/i);
-      if (match) match = [match[0], match[2], match[1], match[3]];
-    }
-    if (!match) {
-      match = candidate.match(/^[-*]?\s*(\d+(?:\.\d+)?)\s+(.+?)\s+[$€£¥]?\s*([\d,]+(?:\.\d{1,2})?)\s*$/i);
-    }
-    if (match) {
-      const quantity = Number(match[1]);
-      const description = match[2].replace(/[,.]$/, '').replace(/^(?:hours?|hrs?|units?|items?)\s+(?:of\s+)?/i, '').trim();
-      const unitPrice = Number(match[3].replace(/,/g, ''));
-      if (description && Number.isFinite(quantity) && Number.isFinite(unitPrice)) items.push({ description, quantity, unitPrice });
-    }
+    const item = matchItemSegment(candidate);
+    if (item) items.push(item);
   }
   if (items.length === 0) {
-    const fallback = text.match(/(?:for|of)\s+(.+?)\s+(?:at|for)\s*[$€£¥]?\s*([\d,]+(?:\.\d{1,2})?)/i);
-    if (fallback) items.push({ description: fallback[1].replace(/[,.]$/, '').replace(/^(?:hours?|hrs?|units?|items?)\s+(?:of\s+)?/i, '').trim(), quantity: 1, unitPrice: Number(fallback[2].replace(/,/g, '')) });
+    const fallback = text.match(/(?:for|of)\s+(.+?)\s+(?:at|for)\s*[$€£¥₹]?\s*([\d,]+(?:\.\d{1,2})?)/i);
+    if (fallback) {
+      const description = cleanItemDescription(fallback[1]);
+      const unitPrice = Number(fallback[2].replace(/,/g, ''));
+      if (description && Number.isFinite(unitPrice)) items.push({ description, quantity: 1, unitPrice });
+    }
   }
   return items;
 }
@@ -396,11 +518,10 @@ function getAIProviderStatus({ env = process.env } = {}) {
   return { configuredProvider: normalized, selectedProvider: 'deterministic', mode: 'deterministic', model: null, fallback: true, reason: 'No configured cloud provider; Ollama detection has not confirmed a local server', configured };
 }
 
-function parseInvoiceText(input, { openAIHook, now = new Date() } = {}) {
-  // Keep this synchronous deterministic path available for offline callers.
-  // The HTTP app uses parseInvoiceTextAsync so an optional AI extractor can be
-  // used without changing the deterministic fallback.
-  if (process.env.OPENAI_API_KEY && typeof openAIHook === 'function') return openAIHook(input);
+function parseInvoiceText(input, { now = new Date() } = {}) {
+  // Synchronous deterministic path. The HTTP app uses
+  // parseInvoiceTextWithMetadataAsync so an optional AI extractor can be used
+  // without changing this offline fallback.
   if (typeof input !== 'string' || input.trim().length < 3 || input.length > MAX_BODY_TEXT) {
     throw new ValidationError(`text must be between 3 and ${MAX_BODY_TEXT} characters`);
   }
@@ -408,9 +529,7 @@ function parseInvoiceText(input, { openAIHook, now = new Date() } = {}) {
   const customer = extractCustomer(text);
   const items = parseItems(text);
   if (items.length === 0) throw new ValidationError('could not find an invoice item; include quantity, description, and price');
-  const taxMatch = text.match(/(?:sales\s+)?tax\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%/i);
-  const taxRate = taxMatch ? Number(taxMatch[1]) : 0;
-  const totals = calculateTotals(items, taxRate);
+  const totals = calculateTotals(items, parseTaxRate(text));
   const notesMatch = text.match(/notes?\s*[:=-]\s*(.+)$/im);
   return {
     customer: { name: customer.name, ...(customer.email ? { email: customer.email } : {}) },
@@ -530,8 +649,14 @@ function normalizeInvoiceInput(input, id, now) {
   };
 }
 
+function newPayToken() {
+  return crypto.randomBytes(18).toString('base64url');
+}
+
 function seedInvoice(data) {
   const totals = calculateTotals(data.items, data.taxRate || 0);
+  const events = [];
+  for (const event of data.events || []) appendEvent(events, event);
   return {
     id: data.id,
     customer: data.customer,
@@ -546,47 +671,183 @@ function seedInvoice(data) {
     reference: data.reference || null,
     status: data.status || 'DRAFT',
     paypalInvoiceId: data.paypalInvoiceId || null,
+    payToken: data.payToken || newPayToken(),
+    paypalOrderId: data.paypalOrderId || null,
+    orderStatus: data.orderStatus || null,
     reminderCount: data.reminderCount || 0,
+    lastRemindedAt: data.lastRemindedAt || null,
     createdAt: data.createdAt,
     updatedAt: data.updatedAt,
-    events: data.events || []
+    events
   };
 }
 
-const SEEDED_INVOICES = [
-  seedInvoice({
-    id: 'inv_seed_001',
-    customer: { name: 'Northwind Studio', email: 'billing@northwind.example' },
-    currency: 'USD',
-    dueDate: '2026-11-15',
-    items: [{ description: 'Cashflow setup', quantity: 1, unitPrice: 450 }],
-    taxRate: 8.25,
-    status: 'SENT',
-    paypalInvoiceId: 'MOCK-INV-SEED-001',
-    createdAt: '2026-10-01T09:00:00.000Z',
-    updatedAt: '2026-10-01T09:00:00.000Z',
-    events: [{ type: 'INVOICING.INVOICE.SENT', at: '2026-10-01T09:00:00.000Z' }]
-  }),
-  seedInvoice({
-    id: 'inv_seed_002',
-    customer: { name: 'Acme Design Co', email: 'accounts@acme.example' },
-    currency: 'USD',
-    dueDate: '2026-10-18',
-    items: [{ description: 'Brand review', quantity: 2, unitPrice: 125 }],
-    taxRate: 0,
-    status: 'SENT',
-    paypalInvoiceId: 'MOCK-INV-SEED-002',
-    createdAt: '2026-09-15T09:00:00.000Z',
-    updatedAt: '2026-10-08T09:00:00.000Z',
-    events: [{ type: 'INVOICING.INVOICE.SENT', at: '2026-10-08T09:00:00.000Z' }]
-  })
-];
+function isoDay(base, offsetDays) {
+  const date = new Date(base);
+  date.setUTCDate(date.getUTCDate() + offsetDays);
+  return date.toISOString().slice(0, 10);
+}
+
+function isoMoment(base, offsetDays, hour = 9) {
+  const date = new Date(base);
+  date.setUTCDate(date.getUTCDate() + offsetDays);
+  date.setUTCHours(hour, 0, 0, 0);
+  return date.toISOString();
+}
+
+/**
+ * Seed data is relative to "now" so a demo recorded weeks from now still shows
+ * one overdue invoice, one invoice due soon, one paid invoice, and one draft.
+ */
+function buildSeedInvoices({ now = new Date().toISOString() } = {}) {
+  const base = new Date(now);
+  if (Number.isNaN(base.getTime())) throw new ValidationError('seed base date must be valid');
+  const sentAtOne = isoMoment(base, -18);
+  const sentAtTwo = isoMoment(base, -24);
+  const paidAt = isoMoment(base, -3, 14);
+  return [
+    seedInvoice({
+      id: 'inv_seed_001',
+      customer: { name: 'Northwind Studio', email: 'billing@northwind.example' },
+      currency: 'USD',
+      dueDate: isoDay(base, 9),
+      items: [{ description: 'Cashflow setup', quantity: 1, unitPrice: 450 }],
+      taxRate: 8.25,
+      status: 'SENT',
+      paypalInvoiceId: 'MOCK-INV-SEED-001',
+      createdAt: sentAtOne,
+      updatedAt: sentAtOne,
+      events: [{ type: 'INVOICING.INVOICE.SENT', at: sentAtOne, source: 'seed' }]
+    }),
+    seedInvoice({
+      id: 'inv_seed_002',
+      customer: { name: 'Acme Design Co', email: 'accounts@acme.example' },
+      currency: 'USD',
+      dueDate: isoDay(base, -8),
+      items: [{ description: 'Brand review', quantity: 2, unitPrice: 125 }],
+      taxRate: 0,
+      status: 'SENT',
+      paypalInvoiceId: 'MOCK-INV-SEED-002',
+      createdAt: sentAtTwo,
+      updatedAt: sentAtTwo,
+      events: [{ type: 'INVOICING.INVOICE.SENT', at: sentAtTwo, source: 'seed' }]
+    }),
+    seedInvoice({
+      id: 'inv_seed_003',
+      customer: { name: 'Harbor & Pine', email: 'finance@harborandpine.example' },
+      currency: 'USD',
+      dueDate: isoDay(base, -2),
+      items: [{ description: 'Q3 brand system', quantity: 1, unitPrice: 1200 }],
+      taxRate: 0,
+      status: 'PAID',
+      paypalInvoiceId: 'MOCK-INV-SEED-003',
+      createdAt: isoMoment(base, -31),
+      updatedAt: paidAt,
+      events: [
+        { type: 'INVOICING.INVOICE.SENT', at: isoMoment(base, -31), source: 'seed' },
+        { type: 'INVOICING.INVOICE.PAID', at: paidAt, source: 'seed', verified: false, eventId: 'SEED-PAID-003' }
+      ]
+    }),
+    seedInvoice({
+      id: 'inv_seed_004',
+      customer: { name: 'Meridian Labs', email: 'ops@meridianlabs.example' },
+      currency: 'USD',
+      dueDate: isoDay(base, 21),
+      items: [
+        { description: 'Discovery workshop', quantity: 1, unitPrice: 900 },
+        { description: 'Prototype sprint', quantity: 2, unitPrice: 650 }
+      ],
+      taxRate: 5,
+      status: 'DRAFT',
+      createdAt: isoMoment(base, -1, 16),
+      updatedAt: isoMoment(base, -1, 16),
+      events: []
+    })
+  ];
+}
+
+const SEEDED_INVOICES = buildSeedInvoices();
+
+function allocateTax(items, tax) {
+  const cents = Math.round(tax * 100);
+  if (!items.length || cents === 0) return items.map(() => 0);
+  const subtotalCents = items.reduce((sum, item) => sum + Math.round(item.amount * 100), 0);
+  if (subtotalCents === 0) return items.map(() => 0);
+  let allocated = 0;
+  return items.map((item, index) => {
+    if (index === items.length - 1) return (cents - allocated) / 100;
+    const share = Math.round((Math.round(item.amount * 100) / subtotalCents) * cents);
+    allocated += share;
+    return share / 100;
+  });
+}
+
+/**
+ * Build the Invoicing v2 payload. Tax is allocated per item so the PayPal
+ * invoice total always equals the locally displayed total (the previous
+ * implementation omitted tax entirely, which silently under-billed).
+ */
+function buildPayPalInvoicePayload(invoice, { brandName = 'Cashflow Copilot', invoicerEmail = null } = {}) {
+  const taxShares = allocateTax(invoice.items, invoice.tax);
+  const items = invoice.items.map((item, index) => {
+    const taxAmount = taxShares[index];
+    return {
+      name: item.description.slice(0, 127),
+      description: item.description.slice(0, 1000),
+      quantity: String(item.quantity),
+      unit_amount: { currency_code: invoice.currency, value: item.unitPrice.toFixed(2) },
+      ...(taxAmount > 0
+        ? { tax: { name: 'Tax', percent: String(invoice.taxRate), amount: { currency_code: invoice.currency, value: taxAmount.toFixed(2) } } }
+        : {}),
+      unit_of_measure: 'QUANTITY'
+    };
+  });
+  return {
+    detail: {
+      invoice_number: invoice.id.slice(0, 25),
+      reference: (invoice.reference || invoice.id).slice(0, 120),
+      currency_code: invoice.currency,
+      note: invoice.notes ? invoice.notes.slice(0, 4000) : undefined,
+      memo: invoice.notes ? invoice.notes.slice(0, 1000) : undefined,
+      payment_term: invoice.dueDate ? { term_type: 'DUE_ON_DATE_SPECIFIED', due_date: invoice.dueDate } : undefined
+    },
+    invoicer: {
+      name: { given_name: 'Cashflow', surname: 'Copilot' },
+      ...(invoicerEmail ? { email_address: invoicerEmail } : {})
+    },
+    primary_recipients: [{ billing_info: { name: { full_name: invoice.customer.name }, email_address: invoice.customer.email } }],
+    items
+  };
+}
+
+function buildPayPalOrderPayload(invoice, { returnUrl, cancelUrl, brandName = 'Cashflow Copilot' } = {}) {
+  return {
+    intent: 'CAPTURE',
+    purchase_units: [{
+      reference_id: invoice.id.slice(0, 256),
+      custom_id: invoice.id.slice(0, 127),
+      description: `Invoice ${invoice.id} for ${invoice.customer.name}`.slice(0, 127),
+      amount: { currency_code: invoice.currency, value: invoice.total.toFixed(2) }
+    }],
+    application_context: {
+      brand_name: brandName.slice(0, 127),
+      user_action: 'PAY_NOW',
+      shipping_preference: 'NO_SHIPPING',
+      ...(returnUrl ? { return_url: returnUrl.slice(0, 4000) } : {}),
+      ...(cancelUrl ? { cancel_url: cancelUrl.slice(0, 4000) } : {})
+    }
+  };
+}
 
 class MockPayPalAdapter {
   constructor() {
     this.name = 'mock';
     this.sequence = 1;
+    this.orderSequence = 1;
+    this.captureSequence = 1;
     this.reminders = [];
+    this.orders = new Map();
+    this.captures = [];
   }
 
   async createInvoice(invoice) {
@@ -602,10 +863,31 @@ class MockPayPalAdapter {
     this.reminders.push(paypalInvoiceId);
     return { id: paypalInvoiceId, status: 'SENT', reminded: true };
   }
+
+  async cancelInvoice(paypalInvoiceId) {
+    return { id: paypalInvoiceId, status: 'CANCELLED' };
+  }
+
+  async createOrder(invoice, { returnUrl, cancelUrl } = {}) {
+    const id = `MOCK-ORDER-${String(this.orderSequence++).padStart(4, '0')}`;
+    this.orders.set(id, { id, invoiceId: invoice.id, status: 'CREATED', amount: invoice.total, currency: invoice.currency, returnUrl, cancelUrl });
+    return { id, status: 'CREATED', approveUrl: null, mock: true };
+  }
+
+  async captureOrder(orderId) {
+    const order = this.orders.get(orderId);
+    if (!order) throw new PayPalError('mock order was not found');
+    if (order.status === 'COMPLETED') return { id: orderId, status: 'COMPLETED', captureId: order.captureId, amount: order.amount, currency: order.currency, mock: true, duplicate: true };
+    const captureId = `MOCK-CAPTURE-${String(this.captureSequence++).padStart(4, '0')}`;
+    order.status = 'COMPLETED';
+    order.captureId = captureId;
+    this.captures.push(captureId);
+    return { id: orderId, status: 'COMPLETED', captureId, amount: order.amount, currency: order.currency, mock: true, duplicate: false };
+  }
 }
 
 class PayPalSandboxAdapter {
-  constructor({ clientId, clientSecret, fetchImpl = globalThis.fetch, baseUrl = 'https://api-m.sandbox.paypal.com', timeoutMs = normalizeTimeout(process.env.PAYPAL_TIMEOUT_MS || process.env.OUTBOUND_TIMEOUT_MS) } = {}) {
+  constructor({ clientId, clientSecret, fetchImpl = globalThis.fetch, baseUrl = process.env.PAYPAL_BASE_URL || 'https://api-m.sandbox.paypal.com', brandName = process.env.PAYPAL_BRAND_NAME || 'Cashflow Copilot', invoicerEmail = process.env.PAYPAL_INVOICER_EMAIL || null, timeoutMs = normalizeTimeout(process.env.PAYPAL_TIMEOUT_MS || process.env.OUTBOUND_TIMEOUT_MS) } = {}) {
     if (!clientId || !clientSecret) throw new Error('PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET are required together');
     if (typeof fetchImpl !== 'function') throw new Error('fetch is required for the PayPal sandbox adapter');
     this.name = 'paypal-sandbox';
@@ -613,6 +895,8 @@ class PayPalSandboxAdapter {
     this.clientSecret = clientSecret;
     this.fetch = fetchImpl;
     this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.brandName = brandName;
+    this.invoicerEmail = invoicerEmail;
     this.timeoutMs = normalizeTimeout(timeoutMs);
     this.token = null;
   }
@@ -647,6 +931,7 @@ class PayPalSandboxAdapter {
         ...options,
         headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(options.headers || {}) }
       }, this.timeoutMs, 'PayPal API request');
+      this.lastDebugId = response.headers?.get?.('paypal-debug-id') || this.lastDebugId || null;
       const body = await safeJson(response, this.timeoutMs, 'PayPal API response');
       if (!response.ok) throw new PayPalError(`PayPal request failed (${response.status})`);
       return body;
@@ -657,23 +942,17 @@ class PayPalSandboxAdapter {
   }
 
   async createInvoice(invoice) {
-    const payload = {
-      detail: {
-        invoice_number: invoice.id,
-        reference: invoice.reference || invoice.id,
-        currency_code: invoice.currency,
-        note: invoice.notes || undefined,
-        payment_term: invoice.dueDate ? { term_type: 'DUE_ON_DATE_SPECIFIED', due_date: invoice.dueDate } : undefined
-      },
-      invoicer: { name: { given_name: 'Cashflow', surname: 'Copilot' } },
-      primary_recipients: [{ billing_info: { name: { full_name: invoice.customer.name }, email_address: invoice.customer.email } }],
-      items: invoice.items.map((item) => ({ name: item.description, quantity: String(item.quantity), unit_amount: { currency_code: invoice.currency, value: item.unitPrice.toFixed(2) }, unit_of_measure: 'QUANTITY' }))
-    };
-    return this.request('/v2/invoicing/invoices', { method: 'POST', body: JSON.stringify(payload) });
+    return this.request('/v2/invoicing/invoices', {
+      method: 'POST',
+      body: JSON.stringify(buildPayPalInvoicePayload(invoice, { invoicerEmail: this.invoicerEmail }))
+    });
   }
 
   async sendInvoice(paypalInvoiceId) {
-    await this.request(`/v2/invoicing/invoices/${encodeURIComponent(paypalInvoiceId)}/send`, { method: 'POST', body: JSON.stringify({}) });
+    await this.request(`/v2/invoicing/invoices/${encodeURIComponent(paypalInvoiceId)}/send`, {
+      method: 'POST',
+      body: JSON.stringify({ send_to_recipient: true, email_notification: true })
+    });
     return { id: paypalInvoiceId, status: 'SENT' };
   }
 
@@ -682,7 +961,60 @@ class PayPalSandboxAdapter {
     return { id: paypalInvoiceId, status: 'SENT', reminded: true };
   }
 
+  async cancelInvoice(paypalInvoiceId) {
+    await this.request(`/v2/invoicing/invoices/${encodeURIComponent(paypalInvoiceId)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ subject: 'Invoice cancelled', note: 'Cancelled by the merchant from Cashflow Copilot.', send_to_invoice_payer: false })
+    });
+    return { id: paypalInvoiceId, status: 'CANCELLED' };
+  }
+
+  async getInvoice(paypalInvoiceId) {
+    return this.request(`/v2/invoicing/invoices/${encodeURIComponent(paypalInvoiceId)}`, { method: 'GET' });
+  }
+
+  async createOrder(invoice, { returnUrl, cancelUrl } = {}) {
+    const body = await this.request('/v2/checkout/orders', {
+      method: 'POST',
+      body: JSON.stringify(buildPayPalOrderPayload(invoice, { returnUrl, cancelUrl, brandName: this.brandName }))
+    });
+    const approveLink = Array.isArray(body?.links) ? body.links.find((link) => link.rel === 'approve' || link.rel === 'payer-action') : null;
+    return { id: body?.id, status: body?.status || 'CREATED', approveUrl: approveLink?.href || null, mock: false };
+  }
+
+  async captureOrder(orderId) {
+    const body = await this.request(`/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
+      method: 'POST',
+      headers: { 'PayPal-Request-Id': `capture-${orderId}` },
+      body: JSON.stringify({})
+    });
+    const capture = body?.purchase_units?.[0]?.payments?.captures?.[0];
+    const amount = capture?.amount?.value ? Number(capture.amount.value) : null;
+    return {
+      id: body?.id || orderId,
+      status: body?.status || 'COMPLETED',
+      captureId: capture?.id || null,
+      amount,
+      currency: capture?.amount?.currency_code || null,
+      mock: false,
+      duplicate: false
+    };
+  }
+
   async verifyWebhookSignature({ transmissionId, transmissionTime, certUrl, authAlgo, transmissionSig, webhookId, webhookEvent }) {
+    // The cert URL is supplied by the caller and forwarded to PayPal. Restrict
+    // it to PayPal hosts so a forged header cannot turn the verifier into an
+    // outbound request to an arbitrary origin.
+    let certHost = '';
+    try {
+      const parsed = new URL(certUrl);
+      certHost = parsed.hostname.toLowerCase();
+      if (parsed.protocol !== 'https:') return false;
+    } catch {
+      return false;
+    }
+    const allowed = /(^|\.)(paypal\.com|paypalobjects\.com|paypal\.cn)$/i.test(certHost);
+    if (!allowed) return false;
     const body = await this.request('/v1/notifications/verify-webhook-signature', {
       method: 'POST',
       body: JSON.stringify({
@@ -718,12 +1050,13 @@ function daysUntil(date, asOf) {
 }
 
 function buildInvoiceInsight(invoice, asOf) {
-  const closed = ['PAID', 'CANCELLED', 'VOID'].includes(invoice.status);
+  const closed = CLOSED_STATUSES.includes(invoice.status);
   const days = invoice.dueDate ? daysUntil(invoice.dueDate, asOf) : null;
   let risk = 'LOW';
   let urgency = 'LOW';
   let priority = 0;
   let action = 'NO_ACTION';
+  let explanation = 'No action is needed.';
   const reasonCodes = [`STATUS_${invoice.status}`];
 
   if (invoice.status === 'DRAFT') {
@@ -731,21 +1064,26 @@ function buildInvoiceInsight(invoice, asOf) {
     urgency = 'HIGH';
     priority = 90;
     action = 'SEND_INVOICE';
+    explanation = `This draft for ${invoice.customer.name} has not been sent, so the payment clock has not started.`;
     reasonCodes.push('DRAFT_NOT_SENT');
   } else if (invoice.status === 'SENT') {
     action = 'MONITOR_PAYMENT';
     priority = 20;
+    explanation = `Payment is still pending for ${invoice.customer.name}.`;
     if (days === null) {
       risk = 'MEDIUM';
       urgency = 'MEDIUM';
       priority = 55;
       action = 'ADD_DUE_DATE';
+      explanation = 'This invoice has no due date, which weakens the forecast and the reminder policy.';
       reasonCodes.push('NO_DUE_DATE');
     } else if (days < 0) {
+      const overdueDays = Math.abs(days);
       risk = days <= -7 ? 'CRITICAL' : 'HIGH';
       urgency = days <= -7 ? 'CRITICAL' : 'HIGH';
       priority = days <= -7 ? 100 : 95;
       action = 'REMIND_INVOICE';
+      explanation = `${invoice.customer.name} is ${overdueDays} day${overdueDays === 1 ? '' : 's'} past due on ${invoice.currency} ${invoice.total.toFixed(2)}. A reminder is the highest-leverage next action.`;
       reasonCodes.push('OVERDUE');
       if (days <= -7) reasonCodes.push('OVERDUE_7_PLUS_DAYS');
     } else if (days <= 3) {
@@ -753,26 +1091,32 @@ function buildInvoiceInsight(invoice, asOf) {
       urgency = 'HIGH';
       priority = 85;
       action = 'REMIND_INVOICE';
+      explanation = `Due in ${days} day${days === 1 ? '' : 's'}. A short reminder now protects the due date.`;
       reasonCodes.push('DUE_WITHIN_3_DAYS');
     } else if (days <= 7) {
       risk = 'MEDIUM';
       urgency = 'MEDIUM';
       priority = 65;
       action = 'REMIND_INVOICE';
+      explanation = `Due in ${days} days. A heads-up keeps the payment on track.`;
       reasonCodes.push('DUE_WITHIN_7_DAYS');
     } else {
+      explanation = `Due in ${days} days and not yet at risk. Keep monitoring.`;
       reasonCodes.push('PAYMENT_PENDING');
     }
   } else if (closed) {
-    reasonCodes.push(invoice.status === 'PAID' ? 'PAID_IN_FULL' : 'CLOSED');
+    reasonCodes.push(invoice.status === 'PAID' ? 'PAID_IN_FULL' : invoice.status === 'REFUNDED' ? 'REFUNDED' : 'CLOSED');
+    explanation = invoice.status === 'PAID' ? 'Paid in full. Nothing to collect.' : invoice.status === 'REFUNDED' ? 'This invoice was refunded.' : 'This invoice is closed.';
   } else {
     risk = 'MEDIUM';
     urgency = 'MEDIUM';
     priority = 40;
     action = 'REVIEW_STATUS';
+    explanation = 'This invoice has an unexpected status and should be reviewed.';
     reasonCodes.push('UNMAPPED_STATUS');
   }
 
+  const riskScore = risk === 'CRITICAL' ? 100 : risk === 'HIGH' ? 80 : risk === 'MEDIUM' ? 50 : 10;
   return {
     invoiceId: invoice.id,
     customer: invoice.customer,
@@ -781,37 +1125,123 @@ function buildInvoiceInsight(invoice, asOf) {
     currency: invoice.currency,
     dueDate: invoice.dueDate,
     daysUntilDue: days,
+    daysOverdue: days !== null && days < 0 ? Math.abs(days) : 0,
     risk,
+    riskScore,
     urgency,
     confidence: days === null && invoice.status === 'SENT' ? 0.84 : 0.99,
     reasonCodes,
-    nextAction: { type: action, action, priority, invoiceId: invoice.id, reasonCodes: [...reasonCodes] }
+    explanation,
+    nextAction: {
+      type: action,
+      action,
+      priority,
+      invoiceId: invoice.id,
+      reasonCodes: [...reasonCodes],
+      requiresApproval: action === 'REMIND_INVOICE' || action === 'SEND_INVOICE',
+      label: action === 'REMIND_INVOICE' ? 'Send reminder' : action === 'SEND_INVOICE' ? 'Send invoice' : action === 'ADD_DUE_DATE' ? 'Add a due date' : action === 'MONITOR_PAYMENT' ? 'Monitor payment' : 'No action'
+    }
   };
 }
 
-function buildInsights(invoices, { now = new Date().toISOString() } = {}) {
-  const invoiceInsights = invoices.map((invoice) => buildInvoiceInsight(invoice, now));
-  const recommendations = invoiceInsights.slice().sort((a, b) => b.nextAction.priority - a.nextAction.priority || a.invoiceId.localeCompare(b.invoiceId));
-  const horizons = [7, 14, 30];
-  const projectedCashPosition = {};
-  const projections = [];
-  for (const horizonDays of horizons) {
-    const byCurrency = {};
-    for (const insight of invoiceInsights) {
-      if (insight.status !== 'SENT' || insight.daysUntilDue === null || insight.daysUntilDue > horizonDays) continue;
-      byCurrency[insight.currency] = roundCents((byCurrency[insight.currency] || 0) + insight.amount);
-    }
-    projectedCashPosition[String(horizonDays)] = byCurrency;
-    projections.push({ horizonDays, expectedIncoming: byCurrency, invoiceIds: invoiceInsights.filter((item) => item.status === 'SENT' && item.daysUntilDue !== null && item.daysUntilDue <= horizonDays).map((item) => item.invoiceId) });
+function sumByCurrency(items) {
+  const totals = {};
+  for (const item of items) {
+    const amount = Number(item.amount ?? item.total ?? 0);
+    totals[item.currency || DEFAULT_CURRENCY] = roundCents((totals[item.currency || DEFAULT_CURRENCY] || 0) + amount);
   }
+  return totals;
+}
+
+function buildInsights(invoices, { now = new Date().toISOString(), policy = loadPolicy() } = {}) {
+  const payerStats = buildPayerStats(invoices);
+  const invoiceInsights = invoices.map((invoice) => {
+    const base = buildInvoiceInsight(invoice, now);
+    const forecast = forecastInvoice(invoice, payerStats, { asOf: now });
+    const withForecast = {
+      ...base,
+      expectedPaymentDate: forecast.expectedDate,
+      expectedDaysFromNow: forecast.expectedDaysFromNow,
+      forecastBasis: forecast.basis,
+      forecastConfidence: forecast.confidence,
+      payerMedianLatenessDays: forecast.medianLateness,
+      payerPaidCount: forecast.paidCount
+    };
+    return applyPolicyToInsight(withForecast, invoice, policy, now);
+  });
+  const open = invoiceInsights.filter((insight) => insight.status === 'DRAFT' || insight.status === 'SENT');
+  const actionable = invoiceInsights
+    .filter((insight) => !['NO_ACTION', 'MONITOR_PAYMENT'].includes(insight.nextAction.action) && !CLOSED_STATUSES.includes(insight.status))
+    .sort((a, b) => b.nextAction.priority - a.nextAction.priority || a.invoiceId.localeCompare(b.invoiceId));
+  const overdue = open.filter((insight) => insight.daysUntilDue !== null && insight.daysUntilDue < 0);
+  const dueWithin7 = open.filter((insight) => insight.daysUntilDue !== null && insight.daysUntilDue >= 0 && insight.daysUntilDue <= 7);
+  const drafts = open.filter((insight) => insight.status === 'DRAFT');
+  const sent = open.filter((insight) => insight.status === 'SENT');
+  const outstandingByCurrency = sumByCurrency(sent);
+  const draftByCurrency = sumByCurrency(drafts);
+  const overdueByCurrency = sumByCurrency(overdue);
+  const dueWithin7ByCurrency = sumByCurrency(dueWithin7);
+  const collectedByCurrency = sumByCurrency(invoiceInsights.filter((insight) => insight.status === 'PAID'));
+
+  const outstandingTotal = Object.values(outstandingByCurrency).reduce((sum, value) => sum + value, 0);
+  const overdueTotal = Object.values(overdueByCurrency).reduce((sum, value) => sum + value, 0);
+  const overdueRatio = outstandingTotal > 0 ? overdueTotal / outstandingTotal : 0;
+  const healthScore = Math.max(0, Math.min(100, Math.round(100 - overdueRatio * 65 - drafts.length * 4 - (dueWithin7.length > 2 ? 5 : 0))));
+  const healthLabel = healthScore >= 80 ? 'healthy' : healthScore >= 60 ? 'watch' : healthScore >= 40 ? 'at risk' : 'critical';
+
+  const horizons = [7, 14, 30];
+  const expectedCashPosition = projectCash(invoices, payerStats, horizons, { asOf: now });
+  const projectedCashPosition = expectedCashPosition;
+  const projections = horizons.map((horizonDays) => {
+    const expected = invoiceInsights.filter((insight) => {
+      if (insight.status !== 'SENT') return false;
+      if (insight.expectedDaysFromNow !== null) return insight.expectedDaysFromNow <= horizonDays;
+      return insight.daysUntilDue !== null && insight.daysUntilDue <= horizonDays;
+    });
+    return { horizonDays, expectedIncoming: expectedCashPosition[String(horizonDays)] || {}, invoiceIds: expected.map((item) => item.invoiceId) };
+  });
+  const totalForHorizon = (horizonDays) => Object.values(expectedCashPosition[String(horizonDays)] || {}).reduce((sum, value) => sum + value, 0);
+
+  const policyDecisions = invoiceInsights
+    .filter((insight) => insight.policy?.reminder)
+    .map((insight) => ({ invoiceId: insight.invoiceId, customer: insight.customer?.name, ...insight.policy.reminder }));
+
   return {
     asOf: now,
     invoices: invoiceInsights,
-    recommendations,
+    recommendations: actionable,
     projectedCashPosition,
+    expectedCashPosition,
     projections,
-    nextAction: recommendations[0]?.nextAction || null,
-    prioritizedNextAction: recommendations[0]?.nextAction || null
+    payerStats: {
+      global: payerStats.global,
+      payers: [...payerStats.payers.values()].sort((a, b) => b.paidCount - a.paidCount)
+    },
+    policy: { version: policy.version, reminders: policy.reminders, sending: policy.sending, writeOff: policy.writeOff },
+    policyDecisions,
+    summary: {
+      invoiceCount: invoices.length,
+      openCount: open.length,
+      sentCount: sent.length,
+      overdueCount: overdue.length,
+      dueWithin7Count: dueWithin7.length,
+      draftCount: drafts.length,
+      paidCount: invoiceInsights.filter((insight) => insight.status === 'PAID').length,
+      outstandingByCurrency,
+      draftByCurrency,
+      overdueByCurrency,
+      dueWithin7ByCurrency,
+      collectedByCurrency,
+      outstandingTotal,
+      overdueTotal,
+      healthScore,
+      healthLabel,
+      projected7: totalForHorizon(7),
+      projected14: totalForHorizon(14),
+      projected30: totalForHorizon(30)
+    },
+    nextAction: actionable[0]?.nextAction || null,
+    prioritizedNextAction: actionable[0]?.nextAction || null
   };
 }
 
@@ -820,16 +1250,94 @@ function createPayPalAdapter(env = process.env, options = {}) {
   const hasSecret = Boolean(env.PAYPAL_CLIENT_SECRET);
   if (!hasId && !hasSecret) return new MockPayPalAdapter();
   if (!hasId || !hasSecret) throw new Error('PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET must both be configured');
-  return new PayPalSandboxAdapter({ clientId: env.PAYPAL_CLIENT_ID, clientSecret: env.PAYPAL_CLIENT_SECRET, ...options });
+  return new PayPalSandboxAdapter({
+    clientId: env.PAYPAL_CLIENT_ID,
+    clientSecret: env.PAYPAL_CLIENT_SECRET,
+    baseUrl: env.PAYPAL_BASE_URL || undefined,
+    brandName: env.PAYPAL_BRAND_NAME || undefined,
+    invoicerEmail: env.PAYPAL_INVOICER_EMAIL || undefined,
+    ...options
+  });
+}
+
+function rehydrateInvoice(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string') throw new Error('invalid persisted invoice');
+  const invoice = { ...raw, customer: raw.customer || { name: 'Customer' }, items: Array.isArray(raw.items) ? raw.items : [] };
+  invoice.payToken = invoice.payToken || newPayToken();
+  invoice.reminderCount = Number(invoice.reminderCount) || 0;
+  invoice.lastRemindedAt = invoice.lastRemindedAt || null;
+  invoice.paypalOrderId = invoice.paypalOrderId || null;
+  invoice.orderStatus = invoice.orderStatus || null;
+  invoice.orderApproveUrl = invoice.orderApproveUrl || null;
+  invoice.events = Array.isArray(raw.events) ? raw.events : [];
+  if (invoice.events.some((event) => !event.hash)) {
+    const sealed = [];
+    for (const event of invoice.events) appendEvent(sealed, event);
+    invoice.events = sealed;
+  }
+  return invoice;
 }
 
 class InvoiceStore {
-  constructor({ adapter = createPayPalAdapter(), clock = () => new Date().toISOString(), seed = SEEDED_INVOICES } = {}) {
+  constructor({ adapter = createPayPalAdapter(), clock = () => new Date().toISOString(), seed = null, persistence = null, minReminderIntervalHours = 0, policy = loadPolicy() } = {}) {
     this.adapter = adapter;
     this.clock = clock;
-    this.invoices = new Map(seed.map((invoice) => [invoice.id, clone(invoice)]));
-    this.sequence = 1;
+    this.persistence = persistence;
+    this.policy = policy;
+    this.minReminderIntervalHours = Math.max(0, Number(minReminderIntervalHours) || 0);
     this.pendingSends = new Set();
+    this.pendingReminders = new Set();
+    this.pendingCaptures = new Set();
+    this.restored = false;
+    const snapshot = persistence?.load?.() || null;
+    if (snapshot) {
+      this.invoices = new Map((snapshot.invoices || []).map((invoice) => {
+        const restored = rehydrateInvoice(invoice);
+        // Mock checkout orders do not survive a process restart; clear the
+        // stale remote handle so a new order can be created cleanly.
+        if (this.adapter?.name === 'mock' && restored.orderStatus === 'CREATED') {
+          restored.paypalOrderId = null;
+          restored.orderStatus = null;
+          restored.orderApproveUrl = null;
+        }
+        return [restored.id, restored];
+      }));
+      this.sequence = Number(snapshot.sequence) || this.inferencesSequence();
+      this.restored = true;
+    } else {
+      const initial = seed || buildSeedInvoices({ now: this.clock() });
+      this.invoices = new Map(initial.map((invoice) => [invoice.id, clone(invoice)]));
+      this.sequence = 1;
+    }
+    this.syncAdapterSequence();
+  }
+
+  inferencesSequence() {
+    let highest = 0;
+    for (const id of this.invoices.keys()) {
+      const match = id.match(/^inv_(\d+)$/);
+      if (match) highest = Math.max(highest, Number(match[1]));
+    }
+    return highest + 1;
+  }
+
+  syncAdapterSequence() {
+    if (this.adapter?.name !== 'mock') return;
+    let highest = 0;
+    for (const invoice of this.invoices.values()) {
+      const match = String(invoice.paypalInvoiceId || '').match(/^MOCK-INV-(\d+)$/);
+      if (match) highest = Math.max(highest, Number(match[1]));
+    }
+    this.adapter.sequence = Math.max(this.adapter.sequence || 1, highest + 1);
+  }
+
+  snapshot() {
+    return { version: 1, savedAt: this.clock(), sequence: this.sequence, invoices: this.listInvoices() };
+  }
+
+  persist() {
+    if (!this.persistence) return;
+    this.persistence.scheduleSave(this.snapshot());
   }
 
   listInvoices() { return clone([...this.invoices.values()]); }
@@ -840,32 +1348,71 @@ class InvoiceStore {
     return invoice;
   }
 
+  findByPayToken(token) {
+    if (typeof token !== 'string' || token.length < 10 || token.length > 128) throw new NotFoundError('payment link was not found');
+    const invoice = [...this.invoices.values()].find((candidate) => candidate.payToken === token);
+    if (!invoice) throw new NotFoundError('payment link was not found');
+    return invoice;
+  }
+
   state() {
     const invoices = this.listInvoices();
+    const insights = buildInsights(invoices, { now: this.clock(), policy: this.policy });
     const byStatus = {};
-    const outstanding = {};
-    const paid = {};
-    for (const invoice of invoices) {
-      byStatus[invoice.status] = (byStatus[invoice.status] || 0) + 1;
-      if (invoice.status === 'PAID') paid[invoice.currency] = roundCents((paid[invoice.currency] || 0) + invoice.total);
-      else if (!['CANCELLED', 'VOID'].includes(invoice.status)) outstanding[invoice.currency] = roundCents((outstanding[invoice.currency] || 0) + invoice.total);
-    }
-    return { invoices, summary: { invoiceCount: invoices.length, byStatus, outstanding, paid, totalOutstanding: outstanding.USD || 0, totalPaid: paid.USD || 0 }, adapter: this.adapter.name };
+    for (const invoice of invoices) byStatus[invoice.status] = (byStatus[invoice.status] || 0) + 1;
+    return {
+      invoices,
+      summary: {
+        ...insights.summary,
+        invoiceCount: invoices.length,
+        byStatus,
+        outstanding: insights.summary.outstandingByCurrency,
+        paid: insights.summary.collectedByCurrency,
+        totalOutstanding: insights.summary.outstandingByCurrency.USD || 0,
+        totalPaid: insights.summary.collectedByCurrency.USD || 0
+      },
+      adapter: this.adapter.name,
+      persisted: Boolean(this.persistence),
+      policy: insights.policy
+    };
   }
 
   insights() {
-    return buildInsights(this.listInvoices(), { now: this.clock() });
+    return buildInsights(this.listInvoices(), { now: this.clock(), policy: this.policy });
+  }
+
+  payerStats() {
+    return this.insights().payerStats;
+  }
+
+  verifyAudit() {
+    const invoices = [...this.invoices.values()].map((invoice) => {
+      const chain = verifyChain(invoice.events);
+      return { invoiceId: invoice.id, ...chain };
+    });
+    const checkedEvents = invoices.reduce((sum, item) => sum + item.total, 0);
+    const failures = invoices.filter((item) => !item.valid);
+    return {
+      valid: failures.length === 0,
+      checkedAt: this.clock(),
+      invoiceCount: invoices.length,
+      checkedEvents,
+      failures,
+      invoices
+    };
   }
 
   createInvoice(input) {
     const id = `inv_${String(this.sequence++).padStart(5, '0')}`;
     const now = this.clock();
     const invoice = normalizeInvoiceInput(input, id, now);
+    invoice.payToken = newPayToken();
     this.invoices.set(id, invoice);
+    this.persist();
     return clone(invoice);
   }
 
-  async sendInvoice(id) {
+  async sendInvoice(id, { actor = 'merchant' } = {}) {
     const invoice = this.getInvoice(id);
     if (invoice.status === 'SENT') throw new ValidationError('invoice has already been sent');
     if (invoice.status !== 'DRAFT') throw new ValidationError(`a ${invoice.status.toLowerCase()} invoice cannot be sent`);
@@ -880,22 +1427,130 @@ class InvoiceStore {
       await this.adapter.sendInvoice(invoice.paypalInvoiceId);
       invoice.status = 'SENT';
       invoice.updatedAt = this.clock();
-      invoice.events.push({ type: 'INVOICING.INVOICE.SENT', at: invoice.updatedAt });
+      appendEvent(invoice.events, { type: 'INVOICING.INVOICE.SENT', at: invoice.updatedAt, actor, source: this.adapter.name, detail: { paypalInvoiceId: invoice.paypalInvoiceId } });
+      this.persist();
       return clone(invoice);
     } finally {
       this.pendingSends.delete(id);
     }
   }
 
-  async remindInvoice(id) {
+  async remindInvoice(id, { actor = 'merchant', force = false } = {}) {
     const invoice = this.getInvoice(id);
-    if (invoice.status !== 'SENT') throw new ValidationError('only a sent invoice can be reminded');
+    if (!REMINDABLE_STATUSES.includes(invoice.status)) throw new ValidationError('only a sent invoice can be reminded');
     if (!invoice.paypalInvoiceId) throw new ValidationError('invoice has not been sent through PayPal');
-    await this.adapter.remindInvoice(invoice.paypalInvoiceId);
-    invoice.reminderCount = (invoice.reminderCount || 0) + 1;
+    if (this.pendingReminders.has(id)) throw new ValidationError('a reminder is already being sent');
+    if (!force && this.minReminderIntervalHours > 0 && invoice.lastRemindedAt) {
+      const elapsedHours = (Date.parse(this.clock()) - Date.parse(invoice.lastRemindedAt)) / 3600000;
+      if (elapsedHours < this.minReminderIntervalHours) throw new ValidationError(`a reminder was sent less than ${this.minReminderIntervalHours} hours ago`);
+    }
+    this.pendingReminders.add(id);
+    try {
+      await this.adapter.remindInvoice(invoice.paypalInvoiceId);
+      invoice.reminderCount = (invoice.reminderCount || 0) + 1;
+      invoice.updatedAt = this.clock();
+      invoice.lastRemindedAt = invoice.updatedAt;
+      appendEvent(invoice.events, { type: 'INVOICING.INVOICE.REMINDER_SENT', at: invoice.updatedAt, actor, source: this.adapter.name, detail: { reminderNumber: invoice.reminderCount } });
+      this.persist();
+      return clone(invoice);
+    } finally {
+      this.pendingReminders.delete(id);
+    }
+  }
+
+  async cancelInvoice(id, { actor = 'merchant', reason = 'Cancelled by the merchant' } = {}) {
+    const invoice = this.getInvoice(id);
+    if (!['DRAFT', 'SENT'].includes(invoice.status)) throw new ValidationError(`a ${invoice.status.toLowerCase()} invoice cannot be cancelled`);
+    if (invoice.status === 'SENT') {
+      if (!invoice.paypalInvoiceId) throw new ValidationError('invoice has not been sent through PayPal');
+      await this.adapter.cancelInvoice(invoice.paypalInvoiceId);
+    }
+    invoice.status = 'CANCELLED';
     invoice.updatedAt = this.clock();
-    invoice.events.push({ type: 'INVOICING.INVOICE.REMINDER_SENT', at: invoice.updatedAt });
+    appendEvent(invoice.events, { type: 'INVOICING.INVOICE.CANCELLED', at: invoice.updatedAt, actor, source: this.adapter.name, detail: { reason } });
+    this.persist();
     return clone(invoice);
+  }
+
+  async ensurePaymentOrder(id, { baseUrl } = {}) {
+    const invoice = this.getInvoice(id);
+    if (invoice.status !== 'SENT') throw new ValidationError(`a ${invoice.status.toLowerCase()} invoice cannot be paid`);
+    if (!invoice.customer?.email) throw new ValidationError('a customer email is required before a payment link can be created');
+    if (invoice.paypalOrderId && ['CREATED', 'APPROVED'].includes(invoice.orderStatus)) {
+      return { order: { id: invoice.paypalOrderId, status: invoice.orderStatus, approveUrl: invoice.orderApproveUrl, mock: this.adapter.name === 'mock' }, invoice: clone(invoice) };
+    }
+    if (typeof this.adapter.createOrder !== 'function') throw new PayPalError('the configured adapter does not support checkout orders');
+    const returnUrl = baseUrl ? `${baseUrl}/pay/${invoice.payToken}?status=return` : undefined;
+    const cancelUrl = baseUrl ? `${baseUrl}/pay/${invoice.payToken}?status=cancel` : undefined;
+    const order = await this.adapter.createOrder(invoice, { returnUrl, cancelUrl });
+    if (!order?.id) throw new PayPalError('PayPal did not return an order id');
+    invoice.paypalOrderId = order.id;
+    invoice.orderStatus = order.status || 'CREATED';
+    invoice.orderApproveUrl = order.approveUrl || null;
+    invoice.updatedAt = this.clock();
+    appendEvent(invoice.events, { type: 'CHECKOUT.ORDER.CREATED', at: invoice.updatedAt, actor: 'merchant', source: this.adapter.name, detail: { orderId: order.id } });
+    this.persist();
+    return { order: { ...order, id: order.id, status: invoice.orderStatus }, invoice: clone(invoice) };
+  }
+
+  async capturePayment(id, { orderId, source = 'paypal-checkout', verified = false, actor = 'customer' } = {}) {
+    const invoice = this.getInvoice(id);
+    if (invoice.status === 'PAID') return { duplicate: true, invoice: clone(invoice), capture: null };
+    if (invoice.status !== 'SENT') throw new ValidationError(`a ${invoice.status.toLowerCase()} invoice cannot be paid`);
+    const resolvedOrderId = orderId || invoice.paypalOrderId;
+    if (!resolvedOrderId) throw new ValidationError('a PayPal order must be created before it can be captured');
+    if (this.pendingCaptures.has(id)) throw new ValidationError('this payment is already being captured');
+    this.pendingCaptures.add(id);
+    try {
+      const capture = await this.adapter.captureOrder(resolvedOrderId);
+      if (!capture || !['COMPLETED', 'APPROVED'].includes(String(capture.status || '').toUpperCase())) {
+        throw new PayPalError('PayPal did not confirm the payment capture');
+      }
+      invoice.status = 'PAID';
+      invoice.orderStatus = 'COMPLETED';
+      invoice.paymentReference = capture.captureId || resolvedOrderId;
+      invoice.paidAt = this.clock();
+      invoice.updatedAt = invoice.paidAt;
+      appendEvent(invoice.events, {
+        type: 'PAYMENT.CAPTURE.COMPLETED',
+        at: invoice.paidAt,
+        actor,
+        source,
+        verified,
+        eventId: capture.captureId || resolvedOrderId,
+        detail: { orderId: resolvedOrderId, captureId: capture.captureId || null, amount: capture.amount ?? invoice.total, currency: capture.currency || invoice.currency }
+      });
+      this.persist();
+      return { duplicate: false, invoice: clone(invoice), capture };
+    } finally {
+      this.pendingCaptures.delete(id);
+    }
+  }
+
+  /**
+   * Record a payment that PayPal has already confirmed (for example through a
+   * PAYMENT.CAPTURE.COMPLETED webhook). Unlike capturePayment this never calls
+   * the capture endpoint again.
+   */
+  recordPayment(id, { source = 'paypal', verified = true, eventId = null, detail = {}, actor = 'paypal' } = {}) {
+    const invoice = this.getInvoice(id);
+    if (invoice.status === 'PAID') return { duplicate: true, invoice: clone(invoice) };
+    if (invoice.status !== 'SENT') throw new ValidationError(`a ${invoice.status.toLowerCase()} invoice cannot record a payment`);
+    invoice.status = 'PAID';
+    invoice.paidAt = this.clock();
+    invoice.updatedAt = invoice.paidAt;
+    invoice.paymentReference = detail.captureId || eventId || invoice.paymentReference || null;
+    appendEvent(invoice.events, {
+      type: 'PAYMENT.CAPTURE.COMPLETED',
+      at: invoice.paidAt,
+      actor,
+      source,
+      verified,
+      ...(eventId ? { eventId } : {}),
+      detail
+    });
+    this.persist();
+    return { duplicate: false, invoice: clone(invoice) };
   }
 
   simulateWebhook(input, { source = 'simulated', verified = false } = {}) {
@@ -903,36 +1558,72 @@ class InvoiceStore {
     const eventType = input.eventType ?? input.event_type;
     const resource = input.resource && typeof input.resource === 'object' ? input.resource : {};
     const invoiceId = input.invoiceId ?? input.invoice_id ?? resource.invoice_id ?? resource.id ?? resource.invoice?.id;
-    const allowed = new Set(['INVOICING.INVOICE.SENT', 'INVOICING.INVOICE.PAID', 'INVOICING.INVOICE.CANCELLED', 'INVOICING.INVOICE.VOIDED']);
+    const allowed = new Set(['INVOICING.INVOICE.SENT', 'INVOICING.INVOICE.PAID', 'INVOICING.INVOICE.CANCELLED', 'INVOICING.INVOICE.VOIDED', 'INVOICING.INVOICE.REFUNDED']);
     if (typeof eventType !== 'string' || !allowed.has(eventType)) throw new ValidationError('eventType must be a supported invoice webhook event');
     if (typeof invoiceId !== 'string' || !invoiceId) throw new ValidationError('invoiceId is required');
     let invoice = this.invoices.get(invoiceId);
     if (!invoice) invoice = [...this.invoices.values()].find((candidate) => candidate.paypalInvoiceId === invoiceId);
     if (!invoice) throw new NotFoundError(`invoice ${invoiceId} was not found`);
-    const nextStatus = eventType.endsWith('.PAID') ? 'PAID' : eventType.endsWith('.SENT') ? 'SENT' : eventType.endsWith('.VOIDED') ? 'VOID' : 'CANCELLED';
+    const nextStatus = eventType.endsWith('.PAID') ? 'PAID'
+      : eventType.endsWith('.SENT') ? 'SENT'
+        : eventType.endsWith('.VOIDED') ? 'VOID'
+          : eventType.endsWith('.REFUNDED') ? 'REFUNDED'
+            : 'CANCELLED';
     const eventId = input.eventId ?? input.event_id ?? input.id;
     const eventKey = eventId ? `id:${eventId}` : `type:${eventType}`;
     const duplicate = invoice.events.some((event) => event.eventKey === eventKey || (!eventId && event.type === eventType));
-    if (duplicate) return { accepted: true, duplicate: true, invoice: clone(invoice), event: { type: eventType, invoiceId: invoice.id, source, verified, ...(eventId ? { eventId } : {}) } };
+    const baseEvent = { type: eventType, invoiceId: invoice.id, source, verified, ...(eventId ? { eventId } : {}) };
+    if (duplicate) return { accepted: true, duplicate: true, invoice: clone(invoice), event: baseEvent };
     if (invoice.status === nextStatus || !(INVOICE_TRANSITIONS[invoice.status] || []).includes(nextStatus)) {
-      return {
-        accepted: true,
-        duplicate: invoice.status === nextStatus,
-        ignored: true,
-        stale: invoice.status !== nextStatus,
-        invoice: clone(invoice),
-        event: { type: eventType, invoiceId: invoice.id, source, verified, ...(eventId ? { eventId } : {}) }
-      };
+      return { accepted: true, duplicate: invoice.status === nextStatus, ignored: true, stale: invoice.status !== nextStatus, invoice: clone(invoice), event: baseEvent };
     }
     invoice.status = nextStatus;
     invoice.updatedAt = this.clock();
-    invoice.events.push({ type: eventType, at: invoice.updatedAt, source, verified, eventKey, ...(eventId ? { eventId } : {}) });
-    return { accepted: true, duplicate: false, invoice: clone(invoice), event: { type: eventType, invoiceId: invoice.id, source, verified, ...(eventId ? { eventId } : {}) } };
+    if (nextStatus === 'PAID') invoice.paidAt = invoice.updatedAt;
+    appendEvent(invoice.events, { type: eventType, at: invoice.updatedAt, source, verified, eventKey, actor: source === 'paypal' ? 'paypal' : 'simulator', ...(eventId ? { eventId } : {}) });
+    this.persist();
+    return { accepted: true, duplicate: false, invoice: clone(invoice), event: baseEvent };
+  }
+
+  reset() {
+    const seeds = buildSeedInvoices({ now: this.clock() });
+    this.invoices = new Map(seeds.map((invoice) => [invoice.id, clone(invoice)]));
+    this.sequence = 1;
+    this.syncAdapterSequence();
+    this.persist();
+    return this.state();
   }
 }
 
+/**
+ * A stable, public projection of an invoice for the customer-facing pay page.
+ * It intentionally excludes merchant-only fields such as PayPal ids and events.
+ */
+function publicInvoiceView(invoice) {
+  return {
+    id: invoice.id,
+    customer: { name: invoice.customer.name },
+    currency: invoice.currency,
+    dueDate: invoice.dueDate,
+    notes: invoice.notes,
+    items: invoice.items.map((item) => ({ description: item.description, quantity: item.quantity, unitPrice: item.unitPrice, amount: item.amount })),
+    subtotal: invoice.subtotal,
+    taxRate: invoice.taxRate,
+    tax: invoice.tax,
+    total: invoice.total,
+    status: invoice.status,
+    payToken: invoice.payToken,
+    paidAt: invoice.paidAt || null,
+    paymentReference: invoice.paymentReference || null,
+    orderStatus: invoice.orderStatus || null
+  };
+}
+
 module.exports = {
+  CLOSED_STATUSES,
   DEFAULT_CURRENCY,
+  INVOICE_STATUSES,
+  INVOICE_TRANSITIONS,
   AuthorizationError,
   InvoiceStore,
   MockPayPalAdapter,
@@ -941,13 +1632,23 @@ module.exports = {
   PayPalSandboxAdapter,
   SEEDED_INVOICES,
   ValidationError,
-  calculateTotals,
+  allocateTax,
   buildInsights,
+  buildPayPalInvoicePayload,
+  buildPayPalOrderPayload,
+  buildSeedInvoices,
+  calculateTotals,
   createPayPalAdapter,
+  extractCurrency,
+  extractCustomer,
   getAIProviderStatus,
   normalizeInvoiceInput,
   parseInvoiceText,
   parseInvoiceTextAsync,
   parseInvoiceTextWithMetadataAsync,
-  resolveAIProvider
+  parseItems,
+  parseTaxRate,
+  publicInvoiceView,
+  resolveAIProvider,
+  verifyChain
 };

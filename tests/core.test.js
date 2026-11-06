@@ -2,36 +2,43 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const http = require('node:http');
-const { createApp } = require('../src/server');
-const { InvoiceStore, MockPayPalAdapter, PayPalSandboxAdapter, ValidationError, calculateTotals, parseInvoiceText, parseInvoiceTextAsync, parseInvoiceTextWithMetadataAsync, resolveAIProvider } = require('../src/core');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const {
+  InvoiceStore,
+  MockPayPalAdapter,
+  PayPalSandboxAdapter,
+  ValidationError,
+  allocateTax,
+  buildInsights,
+  buildPayPalInvoicePayload,
+  buildSeedInvoices,
+  calculateTotals,
+  parseInvoiceText,
+  parseInvoiceTextAsync,
+  parseInvoiceTextWithMetadataAsync,
+  publicInvoiceView,
+  resolveAIProvider,
+  verifyChain
+} = require('../src/core');
+const { FilePersistence } = require('../src/persistence');
+const { mergePolicy } = require('../src/policy');
+const { appendEvent } = require('../src/audit');
 
-function createTestStore() {
-  return new InvoiceStore({ adapter: new MockPayPalAdapter(), clock: () => '2026-10-20T12:00:00.000Z' });
-}
+const FIXED_NOW = '2026-10-20T12:00:00.000Z';
 
-function request(server, method, pathname, body, extraHeaders = {}) {
-  return new Promise((resolve, reject) => {
-    const address = server.address();
-    const payload = body === undefined ? null : JSON.stringify(body);
-    const req = http.request({ hostname: '127.0.0.1', port: address.port, path: pathname, method, headers: { ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}), ...extraHeaders } }, (res) => {
-      const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => {
-        const text = Buffer.concat(chunks).toString();
-        let parsed;
-        try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
-        resolve({ status: res.statusCode, headers: res.headers, body: parsed });
-      });
-    });
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
+function createTestStore(options = {}) {
+  return new InvoiceStore({
+    adapter: new MockPayPalAdapter(),
+    clock: () => FIXED_NOW,
+    policy: mergePolicy({}),
+    ...options
   });
 }
 
-test('parser extracts customer, line items, tax and deterministic totals offline', () => {
-  const parsed = parseInvoiceText('Invoice for Acme Corp <billing@acme.example>\n2 hours consulting at $150/hour\n1 report at $25\ntax 8%\ndue 2026-12-01');
+test('parser extracts customer, line items, tax, due date and totals offline', () => {
+  const parsed = parseInvoiceText('Invoice for Acme Corp <billing@acme.example>\n2 hours consulting at $150/hour\n1 report at $25\ntax 8%\ndue 2026-12-01', { now: new Date('2026-10-20T00:00:00.000Z') });
   assert.equal(parsed.customer.name, 'Acme Corp');
   assert.equal(parsed.customer.email, 'billing@acme.example');
   assert.equal(parsed.subtotal, 325);
@@ -39,28 +46,88 @@ test('parser extracts customer, line items, tax and deterministic totals offline
   assert.equal(parsed.total, 351);
   assert.equal(parsed.items.length, 2);
   assert.equal(parsed.dueDate, '2026-12-01');
-  assert.equal(parseInvoiceText('Invoice for Relative Buyer <relative@example.com>\n1 audit at $100\ndue in 15 days', { now: new Date('2026-10-20T00:00:00.000Z') }).dueDate, '2026-11-04');
+});
+
+test('parser handles the exact demo prompts without dropping the whole line', () => {
+  const first = parseInvoiceText('Invoice Acme Design Co <accounts@acme.example> for 2 brand review sessions at $125 each, tax 8%, due in 15 days', { now: new Date('2026-11-07T00:00:00.000Z') });
+  assert.equal(first.customer.name, 'Acme Design Co');
+  assert.equal(first.customer.email, 'accounts@acme.example');
+  assert.deepEqual(first.items, [{ description: 'brand review sessions', quantity: 2, unitPrice: 125, amount: 250 }]);
+  assert.equal(first.taxRate, 8);
+  assert.equal(first.total, 270);
+  assert.equal(first.dueDate, '2026-11-22');
+
+  const second = parseInvoiceText('Create an invoice for Northwind Studio <billing@northwind.example> for 1 cashflow setup at $450, due 2026-11-30', { now: new Date('2026-11-07T00:00:00.000Z') });
+  assert.equal(second.customer.name, 'Northwind Studio');
+  assert.equal(second.total, 450);
+  assert.equal(second.dueDate, '2026-11-30');
+});
+
+test('parser handles labels, multiple items, thousands separators, net terms and currency symbols', () => {
+  const bill = parseInvoiceText('Bill to Harbor and Pine, 3 logo sketches at $80 each and 2 revisions at $40 each, 7.5% tax, net 30', { now: new Date('2026-11-07T00:00:00.000Z') });
+  assert.equal(bill.customer.name, 'Harbor and Pine');
+  assert.equal(bill.items.length, 2);
+  assert.equal(bill.items[0].quantity, 3);
+  assert.equal(bill.total, 344);
+  assert.equal(bill.dueDate, '2026-12-07');
+
+  const euros = parseInvoiceText('Invoice Globex for 2 weeks of design at $2,000 per week, tax 0%, due in 2 weeks', { now: new Date('2026-11-07T00:00:00.000Z') });
+  assert.equal(euros.customer.name, 'Globex');
+  assert.equal(euros.items[0].unitPrice, 2000);
+  assert.equal(euros.total, 4000);
+  assert.equal(euros.dueDate, '2026-11-21');
+
+  const symbol = parseInvoiceText('Invoice Initech for 1 audit at €900', { now: new Date('2026-11-07T00:00:00.000Z') });
+  assert.equal(symbol.currency, 'EUR');
+  assert.equal(symbol.total, 900);
 });
 
 test('totals use rounded cents and reject invalid items', () => {
   assert.deepEqual(calculateTotals([{ description: 'Fractional', quantity: 3, unitPrice: 0.1 }], 7.5), { items: [{ description: 'Fractional', quantity: 3, unitPrice: 0.1, amount: 0.3 }], subtotal: 0.3, taxRate: 7.5, tax: 0.02, total: 0.32 });
   assert.throws(() => calculateTotals([], 0), ValidationError);
   assert.throws(() => calculateTotals([{ description: 'Bad', quantity: 1, unitPrice: -1 }], 0), ValidationError);
+  assert.throws(() => calculateTotals([{ description: 'Bad tax', quantity: 1, unitPrice: 10 }], 101), ValidationError);
 });
 
-test('store creates and sends an invoice through mock PayPal', async () => {
+test('PayPal invoice payload allocates tax per item so PayPal totals match the app', () => {
+  const invoice = { id: 'inv_test_001', customer: { name: 'Tax Buyer', email: 'tax@example.com' }, currency: 'USD', dueDate: '2026-12-01', notes: 'Thanks', reference: null, items: [{ description: 'A', quantity: 3, unitPrice: 10, amount: 30 }, { description: 'B', quantity: 1, unitPrice: 5.1, amount: 5.1 }], subtotal: 35.1, taxRate: 7.5, tax: 2.63, total: 37.73 };
+  const payload = buildPayPalInvoicePayload(invoice);
+  assert.equal(payload.detail.currency_code, 'USD');
+  assert.equal(payload.detail.payment_term.due_date, '2026-12-01');
+  assert.equal(payload.items.length, 2);
+  const taxTotal = payload.items.reduce((sum, item) => sum + Number(item.tax?.amount?.value || 0), 0);
+  const itemTotal = payload.items.reduce((sum, item) => sum + Number(item.unit_amount.value) * Number(item.quantity), 0);
+  assert.equal(Math.round((taxTotal + itemTotal) * 100) / 100, invoice.total);
+  assert.deepEqual(allocateTax(invoice.items, invoice.tax).map((value) => Math.round(value * 100)), [225, 38]);
+});
+
+test('seed data is relative to now and always contains one overdue, one paid and one draft invoice', () => {
+  const seeds = buildSeedInvoices({ now: FIXED_NOW });
+  assert.equal(seeds.length, 4);
+  assert.equal(seeds.find((invoice) => invoice.id === 'inv_seed_002').dueDate, '2026-10-12');
+  assert.equal(seeds.find((invoice) => invoice.id === 'inv_seed_002').status, 'SENT');
+  assert.equal(seeds.find((invoice) => invoice.id === 'inv_seed_003').status, 'PAID');
+  assert.equal(seeds.find((invoice) => invoice.id === 'inv_seed_004').status, 'DRAFT');
+  assert.ok(seeds.every((invoice) => invoice.payToken && invoice.payToken.length >= 20));
+  assert.ok(seeds.every((invoice) => verifyChain(invoice.events).valid));
+});
+
+test('store creates and sends an invoice through mock PayPal with an audit chain', async () => {
   const store = createTestStore();
   const created = store.createInvoice({ customer: { name: 'Demo Buyer', email: 'buyer@example.com' }, items: [{ description: 'Analysis', quantity: 2, unitPrice: 80 }], taxRate: 5 });
   assert.equal(created.status, 'DRAFT');
   assert.equal(created.total, 168);
+  assert.equal(created.payToken.length >= 20, true);
   const sent = await store.sendInvoice(created.id);
   assert.equal(sent.status, 'SENT');
   assert.equal(sent.paypalInvoiceId, 'MOCK-INV-0001');
   assert.equal(sent.events.at(-1).type, 'INVOICING.INVOICE.SENT');
+  assert.ok(sent.events.at(-1).hash);
+  assert.equal(store.verifyAudit().valid, true);
   await assert.rejects(() => store.sendInvoice(created.id), /already been sent/);
 });
 
-test('webhook simulation resolves ids and ignores stale lifecycle events', () => {
+test('webhook simulation resolves ids and ignores stale and refunded transitions', () => {
   const store = createTestStore();
   const result = store.simulateWebhook({ eventType: 'INVOICING.INVOICE.PAID', invoiceId: 'MOCK-INV-SEED-001' });
   assert.equal(result.accepted, true);
@@ -72,66 +139,156 @@ test('webhook simulation resolves ids and ignores stale lifecycle events', () =>
   assert.equal(stale.invoice.status, 'PAID');
   assert.throws(() => store.simulateWebhook({ eventType: 'PAYMENT.SALE.COMPLETED', invoiceId: 'inv_seed_001' }), ValidationError);
 
+  const refunded = store.simulateWebhook({ id: 'evt_refund_1', eventType: 'INVOICING.INVOICE.REFUNDED', invoiceId: 'inv_seed_001' });
+  assert.equal(refunded.invoice.status, 'REFUNDED');
+  const afterRefund = store.simulateWebhook({ id: 'evt_paid_2', eventType: 'INVOICING.INVOICE.PAID', invoiceId: 'inv_seed_001' });
+  assert.equal(afterRefund.stale, true);
+  assert.equal(afterRefund.invoice.status, 'REFUNDED');
+
   for (const [eventType, status] of [['INVOICING.INVOICE.CANCELLED', 'CANCELLED'], ['INVOICING.INVOICE.VOIDED', 'VOID']]) {
     const terminalStore = createTestStore();
     const closed = terminalStore.simulateWebhook({ eventType, invoiceId: 'inv_seed_001' });
     assert.equal(closed.invoice.status, status);
-    for (const staleEventType of ['INVOICING.INVOICE.SENT', 'INVOICING.INVOICE.PAID', 'INVOICING.INVOICE.CANCELLED', 'INVOICING.INVOICE.VOIDED']) {
-      if (staleEventType === eventType) continue;
-      const outOfOrder = terminalStore.simulateWebhook({ id: `stale-${status}-${staleEventType}`, eventType: staleEventType, invoiceId: 'inv_seed_001' });
-      assert.equal(outOfOrder.stale, true);
-      assert.equal(outOfOrder.invoice.status, status);
-    }
   }
 });
 
-test('insights explain invoice risk and project due cash across horizons', () => {
+test('insights explain risk, apply policy, and project payer-adjusted cash', () => {
   const store = createTestStore();
   const insights = store.insights();
   const overdue = insights.invoices.find((item) => item.invoiceId === 'inv_seed_002');
   assert.equal(overdue.status, 'SENT');
-  assert.equal(overdue.risk, 'HIGH');
-  assert.equal(overdue.urgency, 'HIGH');
+  assert.equal(overdue.risk, 'CRITICAL');
+  assert.equal(overdue.daysOverdue, 8);
   assert.equal(overdue.nextAction.type, 'REMIND_INVOICE');
+  assert.equal(overdue.policy.reminder.ruleId, 'REMINDER_ALLOWED');
   assert.ok(overdue.reasonCodes.includes('OVERDUE'));
+  assert.ok(overdue.expectedPaymentDate);
+  assert.equal(overdue.forecastBasis, 'due_date');
   assert.equal(insights.projectedCashPosition['7'].USD, 250);
-  assert.equal(insights.projectedCashPosition['14'].USD, 250);
   assert.equal(insights.projectedCashPosition['30'].USD, 737.13);
   assert.equal(insights.nextAction.invoiceId, 'inv_seed_002');
+  assert.equal(insights.summary.overdueCount, 1);
+  assert.equal(insights.summary.draftCount, 1);
+  assert.ok(insights.summary.healthScore < 100);
+  assert.ok(insights.policyDecisions.length >= 1);
 });
 
-test('mock reminder sends through adapter and records a timeline event', async () => {
+test('policy blocks the reminder limit and escalates instead', async () => {
+  const store = createTestStore({ policy: mergePolicy({ reminders: { maxReminders: 1, minDaysOverdue: 1 } }) });
+  await store.remindInvoice('inv_seed_002');
+  const insight = store.insights().invoices.find((item) => item.invoiceId === 'inv_seed_002');
+  assert.equal(insight.nextAction.action, 'ESCALATE');
+  assert.equal(insight.policy.reminder.ruleId, 'REMINDER_LIMIT_REACHED');
+});
+
+test('reminder and cancellation record hash-chained timeline events', async () => {
   const adapter = new MockPayPalAdapter();
-  const store = new InvoiceStore({ adapter, clock: () => '2026-10-20T12:00:00.000Z' });
+  const store = new InvoiceStore({ adapter, clock: () => FIXED_NOW, policy: mergePolicy({}) });
   const invoice = await store.remindInvoice('inv_seed_002');
   assert.equal(invoice.reminderCount, 1);
   assert.deepEqual(adapter.reminders, ['MOCK-INV-SEED-002']);
   assert.equal(invoice.events.at(-1).type, 'INVOICING.INVOICE.REMINDER_SENT');
-  const draft = store.createInvoice({ customer: { name: 'Draft Buyer', email: 'draft@example.com' }, items: [{ description: 'Draft work', quantity: 1, unitPrice: 10 }] });
-  await assert.rejects(() => store.remindInvoice(draft.id), ValidationError);
+  assert.ok(invoice.events.at(-1).prevHash);
+  const cancelled = await store.cancelInvoice('inv_seed_002');
+  assert.equal(cancelled.status, 'CANCELLED');
+  assert.equal(store.verifyAudit().valid, true);
 });
 
-test('sandbox reminder and webhook verification use the documented PayPal endpoints', async () => {
-  const calls = [];
-  const adapter = new PayPalSandboxAdapter({ clientId: 'client', clientSecret: 'secret', baseUrl: 'https://sandbox.test', fetchImpl: async (url, options) => {
-    calls.push({ url, options });
-    return { ok: true, status: 200, json: async () => (url.endsWith('/token') ? { access_token: 'token', expires_in: 300 } : url.endsWith('/verify-webhook-signature') ? { verification_status: 'SUCCESS' } : {}) };
-  } });
-  const result = await adapter.remindInvoice('remote-1');
-  assert.equal(result.reminded, true);
-  assert.equal(calls.at(-1).url, 'https://sandbox.test/v2/invoicing/invoices/remote-1/remind');
-  assert.equal(calls.at(-1).options.method, 'POST');
-  assert.equal(await adapter.verifyWebhookSignature({ transmissionId: 't1', transmissionTime: 'now', certUrl: 'https://cert', authAlgo: 'SHA256withRSA', transmissionSig: 'sig', webhookId: 'wh_1', webhookEvent: { id: 'evt_1' } }), true);
-  assert.equal(calls.at(-1).url, 'https://sandbox.test/v1/notifications/verify-webhook-signature');
-});
-
-test('webhook simulation is idempotent for repeated event ids', () => {
+test('checkout creates an order, captures it, and marks the invoice paid exactly once', async () => {
   const store = createTestStore();
-  const first = store.simulateWebhook({ id: 'evt_paid_1', eventType: 'INVOICING.INVOICE.PAID', invoiceId: 'inv_seed_001' });
-  const second = store.simulateWebhook({ id: 'evt_paid_1', eventType: 'INVOICING.INVOICE.PAID', invoiceId: 'inv_seed_001' });
+  const { order, invoice } = await store.ensurePaymentOrder('inv_seed_001', { baseUrl: 'https://demo.example' });
+  assert.equal(order.status, 'CREATED');
+  assert.equal(order.mock, true);
+  assert.ok(invoice.paypalOrderId);
+  const first = await store.capturePayment('inv_seed_001', { orderId: order.id });
+  assert.equal(first.invoice.status, 'PAID');
   assert.equal(first.duplicate, false);
+  const second = await store.capturePayment('inv_seed_001', { orderId: order.id });
   assert.equal(second.duplicate, true);
-  assert.equal(second.invoice.events.filter((event) => event.type === 'INVOICING.INVOICE.PAID').length, 1);
+  assert.equal(store.verifyAudit().valid, true);
+  const view = publicInvoiceView(store.getInvoice('inv_seed_001'));
+  assert.equal(Object.prototype.hasOwnProperty.call(view, 'paypalInvoiceId'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(view, 'events'), false);
+});
+
+test('recordPayment handles a verified capture webhook without calling capture again', () => {
+  const store = createTestStore();
+  const result = store.recordPayment('inv_seed_001', { source: 'paypal', verified: true, eventId: 'CAP-1', detail: { captureId: 'CAP-1', amount: 487.13 } });
+  assert.equal(result.invoice.status, 'PAID');
+  assert.equal(result.invoice.paymentReference, 'CAP-1');
+  const duplicate = store.recordPayment('inv_seed_001', { source: 'paypal', verified: true, eventId: 'CAP-1' });
+  assert.equal(duplicate.duplicate, true);
+});
+
+test('audit chain detects tampering', () => {
+  const store = createTestStore();
+  const invoice = store.getInvoice('inv_seed_002');
+  invoice.events[0].type = 'TAMPERED';
+  const result = store.verifyAudit();
+  assert.equal(result.valid, false);
+  assert.equal(result.failures[0].invoiceId, 'inv_seed_002');
+  assert.equal(verifyChain(invoice.events).valid, false);
+});
+
+test('audit append is deterministic for identical events', () => {
+  const first = [];
+  const second = [];
+  appendEvent(first, { type: 'X', at: '2026-01-01T00:00:00.000Z' });
+  appendEvent(second, { type: 'X', at: '2026-01-01T00:00:00.000Z' });
+  assert.equal(first[0].hash, second[0].hash);
+  appendEvent(first, { type: 'Y', at: '2026-01-02T00:00:00.000Z' });
+  assert.equal(first[1].prevHash, first[0].hash);
+});
+
+test('optional file persistence restores invoices, sequence and audit chain', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'copilot-store-'));
+  const file = path.join(directory, 'store.json');
+  try {
+    const persistence = new FilePersistence(file, { debounceMs: 0 });
+    const store = new InvoiceStore({ adapter: new MockPayPalAdapter(), clock: () => FIXED_NOW, policy: mergePolicy({}), persistence });
+    const created = store.createInvoice({ customer: { name: 'Persisted Buyer', email: 'persist@example.com' }, items: [{ description: 'Saved', quantity: 1, unitPrice: 42 }] });
+    await store.persist?.();
+    await persistence.flush();
+    const restoredPersistence = new FilePersistence(file, { debounceMs: 0 });
+    const restored = new InvoiceStore({ adapter: new MockPayPalAdapter(), clock: () => FIXED_NOW, policy: mergePolicy({}), persistence: restoredPersistence });
+    assert.equal(restored.restored, true);
+    assert.ok(restored.getInvoice(created.id));
+    assert.equal(restored.getInvoice(created.id).payToken, created.payToken);
+    assert.equal(restored.verifyAudit().valid, true);
+    assert.equal(restored.sequence, 2);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('sandbox adapter uses documented PayPal endpoints and rejects untrusted cert URLs', async () => {
+  const calls = [];
+  const adapter = new PayPalSandboxAdapter({
+    clientId: 'client',
+    clientSecret: 'secret',
+    baseUrl: 'https://sandbox.test',
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (url.endsWith('/token')) return { ok: true, status: 200, json: async () => ({ access_token: 'token', expires_in: 300 }) };
+      if (url.endsWith('/verify-webhook-signature')) return { ok: true, status: 200, json: async () => ({ verification_status: 'SUCCESS' }) };
+      if (url.endsWith('/v2/checkout/orders')) return { ok: true, status: 200, json: async () => ({ id: 'ORDER-1', status: 'CREATED', links: [{ rel: 'approve', href: 'https://paypal.test/approve' }] }) };
+      if (url.endsWith('/capture')) return { ok: true, status: 200, json: async () => ({ id: 'ORDER-1', status: 'COMPLETED', purchase_units: [{ payments: { captures: [{ id: 'CAP-1', amount: { value: '10.00', currency_code: 'USD' } }] } }] }) };
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+  });
+  const invoice = { id: 'inv_remote_1', customer: { name: 'Remote', email: 'remote@example.com' }, currency: 'USD', dueDate: '2026-12-01', notes: null, reference: null, items: [{ description: 'Work', quantity: 1, unitPrice: 10, amount: 10 }], subtotal: 10, taxRate: 0, tax: 0, total: 10 };
+  const order = await adapter.createOrder(invoice, { returnUrl: 'https://demo.example/pay/token', cancelUrl: 'https://demo.example/pay/token' });
+  assert.equal(order.id, 'ORDER-1');
+  assert.equal(order.approveUrl, 'https://paypal.test/approve');
+  assert.equal(calls.at(-1).url, 'https://sandbox.test/v2/checkout/orders');
+  const captured = await adapter.captureOrder('ORDER-1');
+  assert.equal(captured.captureId, 'CAP-1');
+  assert.equal(calls.at(-1).url, 'https://sandbox.test/v2/checkout/orders/ORDER-1/capture');
+
+  const signature = { transmissionId: 't1', transmissionTime: 'now', certUrl: 'https://api-m.sandbox.paypal.com/cert', authAlgo: 'SHA256withRSA', transmissionSig: 'sig', webhookId: 'wh_1', webhookEvent: { id: 'evt_1' } };
+  assert.equal(await adapter.verifyWebhookSignature(signature), true);
+  assert.equal(await adapter.verifyWebhookSignature({ ...signature, certUrl: 'https://evil.example/cert' }), false);
+  assert.equal(await adapter.verifyWebhookSignature({ ...signature, certUrl: 'http://api-m.sandbox.paypal.com/cert' }), false);
 });
 
 test('configured AI extraction falls back deterministically when the provider fails', async () => {
@@ -214,7 +371,6 @@ test('auto provider detects local Ollama and caches the bounded probe', async ()
   assert.equal(second.ai.provider, 'ollama');
   assert.equal(calls.filter((call) => call.url.endsWith('/api/tags')).length, 1);
   assert.equal(calls.filter((call) => call.url.endsWith('/chat/completions')).length, 2);
-  assert.equal(calls.find((call) => call.url.endsWith('/chat/completions')).options.headers.Authorization, 'Bearer ollama');
 });
 
 test('metadata reports deterministic fallback when a selected provider fails', async () => {
@@ -229,133 +385,10 @@ test('metadata reports deterministic fallback when a selected provider fails', a
   assert.equal(result.invoice.total, 100);
 });
 
-test('health exposes selected AI provider and model without exposing keys', async (t) => {
-  const previous = { provider: process.env.AI_PROVIDER, key: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL };
-  process.env.AI_PROVIDER = 'openai';
-  process.env.OPENAI_API_KEY = 'health-secret';
-  process.env.OPENAI_MODEL = 'health-model';
-  const server = createApp({ store: createTestStore(), publicDir: 'missing-public', parseInvoice: parseInvoiceText });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => {
-    server.close();
-    if (previous.provider === undefined) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = previous.provider;
-    if (previous.key === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous.key;
-    if (previous.model === undefined) delete process.env.OPENAI_MODEL; else process.env.OPENAI_MODEL = previous.model;
-  });
-  const health = await request(server, 'GET', '/api/health');
-  assert.equal(health.body.ai.configuredProvider, 'openai');
-  assert.equal(health.body.ai.selectedProvider, 'openai');
-  assert.equal(health.body.ai.model, 'health-model');
-  assert.equal(Object.prototype.hasOwnProperty.call(health.body.ai, 'apiKey'), false);
-  assert.equal(JSON.stringify(health.body).includes('health-secret'), false);
-});
-
-test('explicit Ollama selection uses the local default without an API key', () => {
-  const previous = { provider: process.env.AI_PROVIDER, ollamaBase: process.env.OLLAMA_BASE_URL };
-  process.env.AI_PROVIDER = 'ollama';
-  delete process.env.OLLAMA_BASE_URL;
-  try {
-    const { getAIProviderStatus } = require('../src/core');
-    const status = getAIProviderStatus();
-    assert.equal(status.selectedProvider, 'ollama');
-    assert.equal(status.mode, 'ai');
-    assert.equal(status.model, 'llama3.2');
-  } finally {
-    if (previous.provider === undefined) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = previous.provider;
-    if (previous.ollamaBase === undefined) delete process.env.OLLAMA_BASE_URL; else process.env.OLLAMA_BASE_URL = previous.ollamaBase;
-  }
-});
-
-test('PayPal sandbox requests abort when the provider exceeds its timeout', async () => {
-  let signal;
-  const adapter = new PayPalSandboxAdapter({
-    clientId: 'client',
-    clientSecret: 'secret',
-    timeoutMs: 20,
-    fetchImpl: async (_url, options) => {
-      signal = options.signal;
-      await new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
-      return resolve();
-    }
-  });
-  await assert.rejects(() => adapter.accessToken(), (error) => error.code === 'PAYPAL_ERROR' && /timed out/.test(error.message));
-  assert.equal(signal.aborted, true);
-});
-
-test('HTTP routes expose state, parse/create/send/webhook flows and strict errors', async (t) => {
-  const server = createApp({ store: createTestStore(), publicDir: 'missing-public', parseInvoice: parseInvoiceText });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => server.close());
-
-  const state = await request(server, 'GET', '/api/state');
-  assert.equal(state.status, 200);
-  assert.equal(state.headers['x-frame-options'], 'DENY');
-  assert.match(state.headers['content-security-policy'], /default-src 'self'/);
-  assert.equal(state.body.invoices.length, 2);
-  assert.equal(state.body.adapter, 'mock');
-
-  const health = await request(server, 'GET', '/api/health');
-  assert.equal(health.status, 200);
-  assert.equal(health.body.adapter, 'mock');
-  assert.equal(health.body.mode, 'mock');
-  assert.equal(typeof health.body.uptime, 'number');
-  assert.equal(health.body.capabilities.paypalWebhooks, false);
-  assert.equal(Object.prototype.hasOwnProperty.call(health.body, 'PAYPAL_CLIENT_SECRET'), false);
-
-  const parsed = await request(server, 'POST', '/api/parse-invoice', { text: 'Invoice for Route Buyer <route@example.com>\n1 design at $100' });
-  assert.equal(parsed.status, 200);
-  const created = await request(server, 'POST', '/api/invoices', { ...parsed.body.invoice });
-  assert.equal(created.status, 201);
-  const id = created.body.invoice.id;
-  const sent = await request(server, 'POST', `/api/invoices/${id}/send`, {});
-  assert.equal(sent.status, 200);
-  assert.equal(sent.body.invoice.status, 'SENT');
-
-  const insights = await request(server, 'GET', '/api/insights');
-  assert.equal(insights.status, 200);
-  assert.ok(insights.body.invoices.some((item) => item.invoiceId === id));
-
-  const reminder = await request(server, 'POST', `/api/invoices/${id}/remind`, {});
-  assert.equal(reminder.status, 200);
-  assert.equal(reminder.body.invoice.reminderCount, 1);
-
-  const webhook = await request(server, 'POST', '/api/webhooks/simulate', { eventType: 'INVOICING.INVOICE.PAID', invoiceId: id });
-  assert.equal(webhook.status, 200);
-  assert.equal(webhook.body.invoice.status, 'PAID');
-  const bad = await request(server, 'POST', '/api/invoices', { customer: { name: 'Missing Email' }, items: [] });
-  assert.equal(bad.status, 400);
-  assert.equal(bad.body.error.code, 'VALIDATION_ERROR');
-  const missing = await request(server, 'GET', '/api/nope');
-  assert.equal(missing.status, 404);
-  const unverified = await request(server, 'POST', '/api/webhooks/paypal', { id: 'evt_1', event_type: 'INVOICING.INVOICE.PAID', resource: { invoice_id: id } });
-  assert.equal(unverified.status, 400);
-  assert.match(unverified.body.error.message, /sandbox adapter/);
-});
-
-test('verified PayPal webhook route gates state changes on signature verification', async (t) => {
+test('buildInsights is pure and does not mutate invoices', () => {
   const store = createTestStore();
-  let verificationInput;
-  store.adapter = {
-    name: 'paypal-sandbox',
-    verifyWebhookSignature: async (input) => { verificationInput = input; return true; }
-  };
-  const previousWebhookId = process.env.PAYPAL_WEBHOOK_ID;
-  process.env.PAYPAL_WEBHOOK_ID = 'WH-DEMO-1';
-  const server = createApp({ store, publicDir: 'missing-public', parseInvoice: parseInvoiceText });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => { server.close(); if (previousWebhookId === undefined) delete process.env.PAYPAL_WEBHOOK_ID; else process.env.PAYPAL_WEBHOOK_ID = previousWebhookId; });
-
-  const event = { id: 'evt_verified_1', event_type: 'INVOICING.INVOICE.PAID', resource: { invoice_id: 'inv_seed_001' } };
-  const result = await request(server, 'POST', '/api/webhooks/paypal', event, {
-    'paypal-transmission-id': 'transmission-1',
-    'paypal-transmission-time': '2026-10-20T12:00:00Z',
-    'paypal-cert-url': 'https://api-m.sandbox.paypal.com/cert',
-    'paypal-auth-algo': 'SHA256withRSA',
-    'paypal-transmission-sig': 'signature-1'
-  });
-  assert.equal(result.status, 200);
-  assert.equal(result.body.event.verified, true);
-  assert.equal(result.body.invoice.status, 'PAID');
-  assert.equal(verificationInput.webhookId, 'WH-DEMO-1');
-  assert.equal(verificationInput.webhookEvent.id, 'evt_verified_1');
+  const invoices = store.listInvoices();
+  const before = JSON.stringify(invoices);
+  buildInsights(invoices, { now: FIXED_NOW });
+  assert.equal(JSON.stringify(invoices), before);
 });

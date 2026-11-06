@@ -1,110 +1,337 @@
 {
   "info": {
+    "_postman_id": "c0a1f5e2-6f6a-4d7e-8f1b-paypal-cashflow-copilot",
     "name": "PayPal Cashflow Copilot",
-    "description": "Inspectable sponsor-ready collection for the Cashflow Copilot demo. Use the PayPal Sandbox environment and never commit credentials.",
+    "description": "Inspectable API collection for Cashflow Copilot. Folder 1 exercises the local app (mock adapter, no credentials). Folder 2 calls PayPal Sandbox Invoicing v2 directly. Folder 3 exercises Orders v2 checkout. The OpenAPI contract lives in openapi/openapi.yaml.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "baseUrl", "value": "http://localhost:3000" },
-    { "key": "invoiceId", "value": "inv_seed_001" },
-    { "key": "paypalInvoiceId", "value": "MOCK-INV-SEED-001" },
-    { "key": "paypalWebhookId", "value": "replace-with-paypal-webhook-id" },
-    { "key": "paypalTransmissionId", "value": "replace-with-paypal-transmission-id" },
-    { "key": "paypalTransmissionTime", "value": "replace-with-paypal-transmission-time" },
-    { "key": "paypalCertUrl", "value": "replace-with-paypal-cert-url" },
-    { "key": "paypalAuthAlgo", "value": "SHA256withRSA" },
-    { "key": "paypalTransmissionSig", "value": "replace-with-paypal-transmission-signature" }
+    { "key": "baseUrl", "value": "http://localhost:3000", "type": "string" },
+    { "key": "paypalBaseUrl", "value": "https://api-m.sandbox.paypal.com", "type": "string" },
+    { "key": "paypalClientId", "value": "", "type": "string" },
+    { "key": "paypalClientSecret", "value": "", "type": "string" },
+    { "key": "paypalToken", "value": "", "type": "string" },
+    { "key": "invoiceId", "value": "", "type": "string" },
+    { "key": "payToken", "value": "", "type": "string" },
+    { "key": "planId", "value": "", "type": "string" },
+    { "key": "paypalInvoiceId", "value": "", "type": "string" },
+    { "key": "paypalOrderId", "value": "", "type": "string" }
   ],
   "item": [
     {
-      "name": "Local app",
+      "name": "1. Local app (mock adapter)",
+      "description": "No credentials required. Starts from the seeded demo ledger.",
       "item": [
         {
-          "name": "Health and capabilities",
-          "request": { "method": "GET", "url": "{{baseUrl}}/api/health" }
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/api/health", "host": ["{{baseUrl}}"], "path": ["api", "health"] },
+            "description": "Secret-free adapter, capability, and AI provider status."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));", "pm.test('no secrets', () => pm.expect(pm.response.text()).to.not.include('PAYPAL_CLIENT_SECRET'));"] }
+            }
+          ]
         },
         {
-          "name": "Get dashboard state",
-          "request": { "method": "GET", "url": "{{baseUrl}}/api/state" }
+          "name": "State",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/api/state", "host": ["{{baseUrl}}"], "path": ["api", "state"] },
+            "description": "Invoices, summary metrics, policy, and runtime metadata."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));", "const body = pm.response.json();", "pm.test('has seeded invoices', () => pm.expect(body.invoices.length).to.be.greaterThan(0));", "pm.collectionVariables.set('invoiceId', body.invoices[0].id);"] }
+            }
+          ]
         },
         {
-          "name": "Get explainable cashflow insights",
-          "request": { "method": "GET", "url": "{{baseUrl}}/api/insights" }
+          "name": "Insights and forecast",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/api/insights", "host": ["{{baseUrl}}"], "path": ["api", "insights"] },
+            "description": "Explainable risk, policy decisions, and payer-adjusted cash projections."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));", "const body = pm.response.json();", "pm.test('has expected cash', () => pm.expect(body.expectedCashPosition).to.be.an('object'));", "pm.test('has policy decisions', () => pm.expect(body.policyDecisions).to.be.an('array'));"] }
+            }
+          ]
         },
         {
-          "name": "Parse invoice intent",
+          "name": "Policy and decision ledger",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/api/policy", "host": ["{{baseUrl}}"], "path": ["api", "policy"] }
+          }
+        },
+        {
+          "name": "Verify audit chain",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/api/audit", "host": ["{{baseUrl}}"], "path": ["api", "audit"] },
+            "description": "Recomputes the SHA-256 chain over every invoice timeline."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));", "pm.test('chain valid', () => pm.expect(pm.response.json().valid).to.equal(true));"] }
+            }
+          ]
+        },
+        {
+          "name": "Parse invoice from natural language",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": { "mode": "raw", "raw": "{\n  \"text\": \"Invoice Acme Design Co <accounts@acme.example> for 2 brand review sessions at $125 each, tax 8%, due in 15 days\"\n}" },
-            "url": "{{baseUrl}}/api/parse-invoice"
-          }
+            "url": { "raw": "{{baseUrl}}/api/parse-invoice", "host": ["{{baseUrl}}"], "path": ["api", "parse-invoice"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));", "const body = pm.response.json();", "pm.test('customer extracted', () => pm.expect(body.invoice.customer.name).to.equal('Acme Design Co'));", "pm.test('total is 270', () => pm.expect(body.invoice.total).to.equal(270));", "pm.test('provenance present', () => pm.expect(body.ai.provider).to.be.a('string'));"] }
+            }
+          ]
         },
         {
-          "name": "Simulate paid webhook",
+          "name": "Create draft invoice",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"customer\": { \"name\": \"Postman Buyer\", \"email\": \"postman@example.com\" },\n  \"currency\": \"USD\",\n  \"dueDate\": \"2026-12-01\",\n  \"items\": [{ \"description\": \"Integration review\", \"quantity\": 2, \"unitPrice\": 75 }],\n  \"taxRate\": 5\n}" },
+            "url": { "raw": "{{baseUrl}}/api/invoices", "host": ["{{baseUrl}}"], "path": ["api", "invoices"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('201 Created', () => pm.response.to.have.status(201));", "const body = pm.response.json();", "pm.test('total recalculated', () => pm.expect(body.invoice.total).to.equal(157.5));", "pm.collectionVariables.set('invoiceId', body.invoice.id);"] }
+            }
+          ]
+        },
+        {
+          "name": "Send invoice with PayPal adapter",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": { "raw": "{{baseUrl}}/api/invoices/{{invoiceId}}/send", "host": ["{{baseUrl}}"], "path": ["api", "invoices", "{{invoiceId}}", "send"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));", "const body = pm.response.json();", "pm.test('status is SENT', () => pm.expect(body.invoice.status).to.equal('SENT'));", "pm.collectionVariables.set('paypalInvoiceId', body.invoice.paypalInvoiceId);"] }
+            }
+          ]
+        },
+        {
+          "name": "Create hosted payment link",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": { "raw": "{{baseUrl}}/api/invoices/{{invoiceId}}/payment-link", "host": ["{{baseUrl}}"], "path": ["api", "invoices", "{{invoiceId}}", "payment-link"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));", "const body = pm.response.json();", "pm.collectionVariables.set('payToken', body.payUrl.split('/').pop());", "pm.collectionVariables.set('paypalOrderId', body.order.id);"] }
+            }
+          ]
+        },
+        {
+          "name": "Public pay page projection",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/api/pay/{{payToken}}", "host": ["{{baseUrl}}"], "path": ["api", "pay", "{{payToken}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));", "pm.test('no PayPal ids leaked', () => pm.expect(pm.response.text()).to.not.include('paypalInvoiceId'));"] }
+            }
+          ]
+        },
+        {
+          "name": "Ask Copilot for a plan",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"Who should I chase today?\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/copilot/plan", "host": ["{{baseUrl}}"], "path": ["api", "copilot", "plan"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));", "const body = pm.response.json();", "pm.test('has a plan', () => pm.expect(body.steps).to.be.an('array'));", "pm.collectionVariables.set('planId', body.id);"] }
+            }
+          ]
+        },
+        {
+          "name": "Execute approved plan steps",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"planId\": \"{{planId}}\",\n  \"stepIds\": []\n}" },
+            "url": { "raw": "{{baseUrl}}/api/copilot/execute", "host": ["{{baseUrl}}"], "path": ["api", "copilot", "execute"] }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": { "type": "text/javascript", "exec": ["// Empty stepIds is rejected on purpose; paste an id from the plan response to execute.", "// Keeping this request in the collection documents the approval gate."] }
+            }
+          ]
+        },
+        {
+          "name": "Simulate payment webhook",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": { "mode": "raw", "raw": "{\n  \"eventType\": \"INVOICING.INVOICE.PAID\",\n  \"invoiceId\": \"{{invoiceId}}\"\n}" },
-            "url": "{{baseUrl}}/api/webhooks/simulate"
+            "url": { "raw": "{{baseUrl}}/api/webhooks/simulate", "host": ["{{baseUrl}}"], "path": ["api", "webhooks", "simulate"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));", "pm.test('invoice paid', () => pm.expect(pm.response.json().invoice.status).to.equal('PAID'));"] }
+            }
+          ]
+        },
+        {
+          "name": "Reset demo",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": { "raw": "{{baseUrl}}/api/demo/reset", "host": ["{{baseUrl}}"], "path": ["api", "demo", "reset"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. PayPal Sandbox Invoicing v2",
+      "description": "Set paypalClientId and paypalClientSecret first. These calls go directly to PayPal, not through the app.",
+      "item": [
+        {
+          "name": "OAuth token",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Accept-Language", "value": "en_US" },
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" },
+              { "key": "Authorization", "value": "Basic {{paypalBasicAuth}}" }
+            ],
+            "body": { "mode": "urlencoded", "urlencoded": [{ "key": "grant_type", "value": "client_credentials" }] },
+            "url": { "raw": "{{paypalBaseUrl}}/v1/oauth2/token", "host": ["{{paypalBaseUrl}}"], "path": ["v1", "oauth2", "token"] }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": { "type": "text/javascript", "exec": ["const id = pm.collectionVariables.get('paypalClientId');", "const secret = pm.collectionVariables.get('paypalClientSecret');", "pm.collectionVariables.set('paypalBasicAuth', btoa(`${id}:${secret}`));"] }
+            },
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));", "pm.collectionVariables.set('paypalToken', pm.response.json().access_token);"] }
+            }
+          ]
+        },
+        {
+          "name": "Create invoice",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{paypalToken}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"detail\": {\n    \"invoice_number\": \"POSTMAN-001\",\n    \"currency_code\": \"USD\",\n    \"note\": \"Postman sandbox invoice\",\n    \"payment_term\": { \"term_type\": \"DUE_ON_DATE_SPECIFIED\", \"due_date\": \"2026-12-01\" }\n  },\n  \"invoicer\": { \"name\": { \"given_name\": \"Cashflow\", \"surname\": \"Copilot\" } },\n  \"primary_recipients\": [{ \"billing_info\": { \"name\": { \"full_name\": \"Postman Buyer\" }, \"email_address\": \"sb-buyer@business.example.com\" } }],\n  \"items\": [{ \"name\": \"Integration review\", \"quantity\": \"1\", \"unit_amount\": { \"currency_code\": \"USD\", \"value\": \"12.34\" }, \"unit_of_measure\": \"QUANTITY\" }]\n}" },
+            "url": { "raw": "{{paypalBaseUrl}}/v2/invoicing/invoices", "host": ["{{paypalBaseUrl}}"], "path": ["v2", "invoicing", "invoices"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));", "const body = pm.response.json();", "pm.collectionVariables.set('paypalInvoiceId', body.id || body.href.split('/').pop());", "pm.test('PayPal-Debug-Id present', () => pm.expect(pm.response.headers.has('PayPal-Debug-Id')).to.equal(true));"] }
+            }
+          ]
+        },
+        {
+          "name": "Send invoice",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{paypalToken}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": { "raw": "{{paypalBaseUrl}}/v2/invoicing/invoices/{{paypalInvoiceId}}/send", "host": ["{{paypalBaseUrl}}"], "path": ["v2", "invoicing", "invoices", "{{paypalInvoiceId}}", "send"] }
+          }
+        },
+        {
+          "name": "Read invoice",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{paypalToken}}" }],
+            "url": { "raw": "{{paypalBaseUrl}}/v2/invoicing/invoices/{{paypalInvoiceId}}", "host": ["{{paypalBaseUrl}}"], "path": ["v2", "invoicing", "invoices", "{{paypalInvoiceId}}"] }
           }
         },
         {
           "name": "Remind invoice",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{baseUrl}}/api/invoices/{{invoiceId}}/remind"
-          }
-        },
-        {
-          "name": "Receive verified PayPal webhook",
-          "request": {
-            "method": "POST",
             "header": [
               { "key": "Content-Type", "value": "application/json" },
-              { "key": "PayPal-Transmission-Id", "value": "{{paypalTransmissionId}}" },
-              { "key": "PayPal-Transmission-Time", "value": "{{paypalTransmissionTime}}" },
-              { "key": "PayPal-Cert-Url", "value": "{{paypalCertUrl}}" },
-              { "key": "PayPal-Auth-Algo", "value": "{{paypalAuthAlgo}}" },
-              { "key": "PayPal-Transmission-Sig", "value": "{{paypalTransmissionSig}}" }
+              { "key": "Authorization", "value": "Bearer {{paypalToken}}" }
             ],
-            "body": { "mode": "raw", "raw": "{\n  \"id\": \"replace-with-paypal-event-id\",\n  \"event_type\": \"INVOICING.INVOICE.PAID\",\n  \"resource\": {\"invoice_id\": \"{{invoiceId}}\"}\n}" },
-            "url": "{{baseUrl}}/api/webhooks/paypal",
-            "description": "Requires a public HTTPS deployment, PAYPAL_WEBHOOK_ID, and real PayPal signature headers. Do not use placeholder values against a real endpoint."
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": { "raw": "{{paypalBaseUrl}}/v2/invoicing/invoices/{{paypalInvoiceId}}/remind", "host": ["{{paypalBaseUrl}}"], "path": ["v2", "invoicing", "invoices", "{{paypalInvoiceId}}", "remind"] }
           }
         }
       ]
     },
     {
-      "name": "PayPal Sandbox reference",
+      "name": "3. PayPal Sandbox Checkout (Orders v2)",
+      "description": "Create and capture an order. Capture only succeeds after buyer approval; the hosted app handles that redirect.",
       "item": [
         {
-          "name": "OAuth token",
+          "name": "Create order",
           "request": {
-            "auth": { "type": "basic", "basic": [{ "key": "username", "value": "{{PAYPAL_CLIENT_ID}}", "type": "string" }, { "key": "password", "value": "{{PAYPAL_CLIENT_SECRET}}", "type": "string" }] },
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }, { "key": "Accept", "value": "application/json" }],
-            "body": { "mode": "urlencoded", "urlencoded": [{ "key": "grant_type", "value": "client_credentials", "type": "text" }] },
-            "url": "https://api-m.sandbox.paypal.com/v1/oauth2/token"
-          }
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{paypalToken}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"intent\": \"CAPTURE\",\n  \"purchase_units\": [{ \"reference_id\": \"postman-order\", \"amount\": { \"currency_code\": \"USD\", \"value\": \"12.34\" } }],\n  \"application_context\": { \"brand_name\": \"Cashflow Copilot\", \"user_action\": \"PAY_NOW\", \"shipping_preference\": \"NO_SHIPPING\" }\n}" },
+            "url": { "raw": "{{paypalBaseUrl}}/v2/checkout/orders", "host": ["{{paypalBaseUrl}}"], "path": ["v2", "checkout", "orders"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));", "const body = pm.response.json();", "pm.collectionVariables.set('paypalOrderId', body.id);"] }
+            }
+          ]
         },
         {
-          "name": "Create invoice (reference)",
+          "name": "Capture order",
           "request": {
-            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }] },
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"detail\": {\"invoice_number\": \"COPILOT-DEMO-001\", \"currency_code\": \"USD\"},\n  \"invoicer\": {\"name\": {\"given_name\": \"Cashflow\", \"surname\": \"Copilot\"}},\n  \"primary_recipients\": [{\"billing_info\": {\"email_address\": \"accounts@example.com\"}}],\n  \"items\": [{\"name\": \"Strategy session\", \"quantity\": \"1\", \"unit_amount\": {\"currency_code\": \"USD\", \"value\": \"250.00\"}, \"unit_of_measure\": \"QUANTITY\"}]\n}" },
-            "url": "https://api-m.sandbox.paypal.com/v2/invoicing/invoices"
-          }
-        },
-        {
-          "name": "Send invoice (reference)",
-          "request": {
-            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }] },
-            "method": "POST",
-            "url": "https://api-m.sandbox.paypal.com/v2/invoicing/invoices/{{paypalInvoiceId}}/send"
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{paypalToken}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": { "raw": "{{paypalBaseUrl}}/v2/checkout/orders/{{paypalOrderId}}/capture", "host": ["{{paypalBaseUrl}}"], "path": ["v2", "checkout", "orders", "{{paypalOrderId}}", "capture"] }
           }
         }
       ]

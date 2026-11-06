@@ -1,0 +1,122 @@
+# PayPal Sandbox setup and evidence
+
+This is the complete path from a fresh PayPal Developer account to a real,
+committed sandbox evidence run.
+
+## 1. Create the developer app
+
+1. Sign in at <https://developer.paypal.com/dashboard/>.
+2. Open **Apps & Credentials** and make sure **Sandbox** is selected.
+3. Create an app (for example `cashflow-copilot`).
+4. Copy the **Client ID** and **Secret**. These are sandbox-only.
+
+## 2. Run the app against sandbox
+
+```sh
+PAYPAL_CLIENT_ID=... PAYPAL_CLIENT_SECRET=... npm start
+```
+
+Check the mode is live:
+
+```sh
+curl -s http://localhost:3000/api/health | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.mode,j.adapter,j.capabilities.checkout)})"
+# sandbox paypal-sandbox true
+```
+
+The sidebar, banner, and `/api/health` should all say sandbox. If they still say
+mock, one of the two credentials is missing.
+
+## 3. Create and send a real sandbox invoice
+
+In the UI:
+
+1. **Draft an invoice** → enter a sandbox buyer email.
+2. Review the extracted fields and totals.
+3. **Approve & send with PayPal**.
+4. Open the invoice drawer and confirm the PayPal invoice id is present.
+
+Or use the collection: [`postman/PayPal-Cashflow-Copilot.postman_collection.json`](../postman/PayPal-Cashflow-Copilot.postman_collection.json),
+folder **2. PayPal Sandbox Invoicing v2**.
+
+## 4. Generate committed evidence
+
+```sh
+PAYPAL_CLIENT_ID=... \
+PAYPAL_CLIENT_SECRET=... \
+SANDBOX_TEST_EMAIL=sb-buyer@business.example.com \
+npm run sandbox:check
+```
+
+The script:
+
+1. Creates a draft through the app.
+2. Sends it through PayPal Invoicing v2.
+3. Reads it back with `GET /v2/invoicing/invoices/{id}` and records the remote status/total.
+4. Sends a reminder.
+5. Verifies the local hash chain.
+6. Writes `docs/sandbox-evidence/<timestamp>.json` with `PayPal-Debug-Id` values.
+
+Review the file, then commit it. It contains no secrets or headers.
+
+## 5. Real webhooks
+
+PayPal cannot call `localhost`. You need a public HTTPS origin:
+
+- Deploy to Render (see [`DEPLOY.md`](DEPLOY.md)), or
+- Use a tunnel for a local run.
+
+Then:
+
+1. Developer Dashboard → your app → **Webhooks** → **Add webhook**.
+2. URL: `https://YOUR_HOST/api/webhooks/paypal`.
+3. Subscribe to:
+   - `INVOICING.INVOICE.SENT`
+   - `INVOICING.INVOICE.PAID`
+   - `INVOICING.INVOICE.CANCELLED`
+   - `INVOICING.INVOICE.VOIDED`
+   - `INVOICING.INVOICE.REFUNDED`
+   - `PAYMENT.CAPTURE.COMPLETED`
+4. Copy the **Webhook ID** into `PAYPAL_WEBHOOK_ID`.
+5. Trigger a real event (send an invoice, or pay it with a sandbox buyer account).
+6. Confirm the invoice timeline shows **Verified PayPal webhook** and an event id.
+
+The verifier calls PayPal's `/v1/notifications/verify-webhook-signature` and
+restricts the certificate URL to `*.paypal.com`, `*.paypalobjects.com`, and
+`*.paypal.cn` over HTTPS.
+
+## 6. Real checkout
+
+1. Send an invoice.
+2. Open the drawer → **Create payment link**.
+3. Open the hosted pay page.
+4. In sandbox mode the button redirects to PayPal; approve with a sandbox personal account.
+5. On return the app captures the order and moves the invoice to PAID.
+
+If the capture fails, check:
+
+- The buyer actually approved the order.
+- `PUBLIC_BASE_URL` matches the origin PayPal redirects back to.
+- The order has not already been captured (duplicate captures return `duplicate: true`).
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+| --- | --- |
+| Still `mock` mode | One credential missing, or env not exported into the server process |
+| `PayPal authentication failed` | Wrong client id/secret, or a live app used against sandbox |
+| `PayPal request failed (422)` | Invalid invoice payload (check the recipient email and item amounts) |
+| `PayPal request failed (404)` | Invoice id belongs to a different environment |
+| Webhook 401 | Missing `PAYPAL-*` headers, wrong `PAYPAL_WEBHOOK_ID`, or verification failed |
+| Webhook accepted but no state change | Event is a duplicate or stale for the current lifecycle status |
+| Checkout capture fails | Buyer never approved, or the order expired (PayPal orders expire) |
+
+## What to commit
+
+- `docs/sandbox-evidence/*.json` from a successful run.
+- A screenshot of the PayPal Developer Dashboard invoice list for the video.
+- Do **not** commit `.env`, client ids, secrets, access tokens, or headers.
+
+## What not to claim
+
+A mocked unit test is not a live run. The README's live-vs-demo table is the
+claim boundary; keep it accurate.
