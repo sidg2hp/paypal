@@ -8,9 +8,10 @@ Installed with:
 npx context-plugins install https://github.com/paypaldev/server-sdk-context-plugin-preview
 ```
 
-This folder contains the **TypeScript** skill set from the installed plugin, plus
-the plugin README and manifest. It is copied here so a judge can inspect the
-context the coding agent was given without installing anything.
+This folder contains the **TypeScript** skill set (`skills/typescript/`) from the
+installed plugin, plus the plugin README and manifest. It is copied here so a
+judge can inspect the context the coding agent was given without installing
+anything.
 
 - License: MIT (see `plugin.json`)
 - The upstream README states this is a hackathon preview, not an official
