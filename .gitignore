@@ -7,3 +7,6 @@ paypal1.pdf
 data/
 .tmp-*
 *.log
+
+# Personal, local-only working checklist (not part of the submission)
+/REMAINING_TODO.txt
