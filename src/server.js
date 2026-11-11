@@ -205,6 +205,12 @@ function healthPayload(store, config, env = process.env) {
     uptime: Math.round(process.uptime() * 1000) / 1000,
     serverTime: new Date().toISOString(),
     persisted: Boolean(store.persistence),
+    paypal: {
+      configured: adapter === 'paypal-sandbox',
+      environment: adapter === 'paypal-sandbox' && typeof store.adapter.environmentName === 'function' ? store.adapter.environmentName() : 'mock',
+      baseUrl: adapter === 'paypal-sandbox' ? store.adapter.baseUrl || null : null,
+      webhookConfigured: Boolean(env.PAYPAL_WEBHOOK_ID)
+    },
     capabilities: {
       parseInvoice: true,
       invoiceCreation: true,

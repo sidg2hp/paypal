@@ -10,10 +10,11 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node --test",
-    "check": "node --check src/core.js && node --check src/server.js && node --check src/agent.js && node --check src/audit.js && node --check src/policy.js && node --check src/forecast.js && node --check src/persistence.js && node --check public/app.js && node --check public/pay.js && node --check scripts/backtest.js && node --check scripts/eval.js && node --check scripts/sandbox-check.js",
+    "check": "node --check src/core.js && node --check src/server.js && node --check src/agent.js && node --check src/audit.js && node --check src/policy.js && node --check src/forecast.js && node --check src/persistence.js && node --check public/app.js && node --check public/pay.js && node --check scripts/backtest.js && node --check scripts/eval.js && node --check scripts/sandbox-check.js && node --check scripts/paypal-auth-check.js",
     "eval": "node scripts/eval.js",
     "backtest": "node scripts/backtest.js",
     "sandbox:check": "node scripts/sandbox-check.js",
+    "paypal:check": "node scripts/paypal-auth-check.js",
     "verify": "npm run check && npm test && npm run eval"
   },
   "engines": {

@@ -72,6 +72,7 @@ video.
 ### PayPal
 
 - [ ] Sandbox credentials select the sandbox adapter.
+- [ ] `npm run paypal:check` reports `SUCCESS` with the configured credentials.
 - [ ] Real create/send/read/remind succeeds.
 - [ ] Sandbox evidence JSON committed.
 - [ ] Webhook subscription verified; event appears once.
@@ -123,6 +124,7 @@ Real PayPal sandbox: not run in this environment (manual step)
 ```sh
 npm run verify
 npm run backtest
+npm run paypal:check
 PAYPAL_CLIENT_ID=... PAYPAL_CLIENT_SECRET=... npm run sandbox:check
 npm start
 ```

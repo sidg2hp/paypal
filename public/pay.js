@@ -21,7 +21,11 @@
   async function api(path, options = {}) {
     const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error?.message || `Request failed (${response.status})`);
+    if (!response.ok) {
+      const message = payload.error?.message || `Request failed (${response.status})`;
+      const debugId = payload.error?.details?.debugId;
+      throw new Error(debugId ? `${message} [PayPal debug ${debugId}]` : message);
+    }
     return payload;
   }
 

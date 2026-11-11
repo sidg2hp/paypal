@@ -72,6 +72,8 @@ test('state, health, insights, policy and audit are secret-free and consistent',
   assert.equal(health.body.capabilities.agentPlanner, true);
   assert.equal(health.body.capabilities.checkout, true);
   assert.equal(health.body.capabilities.auditChain, true);
+  assert.equal(health.body.paypal.configured, false);
+  assert.equal(health.body.paypal.environment, 'mock');
   assert.equal(JSON.stringify(health.body).includes('secret'), false);
 
   const insights = await request(server, 'GET', '/api/insights');

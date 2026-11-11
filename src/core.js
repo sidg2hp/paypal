@@ -960,17 +960,27 @@ class MockPayPalAdapter {
 
 class PayPalSandboxAdapter {
   constructor({ clientId, clientSecret, fetchImpl = globalThis.fetch, baseUrl = process.env.PAYPAL_BASE_URL || 'https://api-m.sandbox.paypal.com', brandName = process.env.PAYPAL_BRAND_NAME || 'Cashflow Copilot', invoicerEmail = process.env.PAYPAL_INVOICER_EMAIL || null, timeoutMs = normalizeTimeout(process.env.PAYPAL_TIMEOUT_MS || process.env.OUTBOUND_TIMEOUT_MS) } = {}) {
-    if (!clientId || !clientSecret) throw new Error('PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET are required together');
+    const normalizedId = String(clientId || '').trim();
+    const normalizedSecret = String(clientSecret || '').trim();
+    if (!normalizedId || !normalizedSecret) throw new Error('PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET are required together');
     if (typeof fetchImpl !== 'function') throw new Error('fetch is required for the PayPal sandbox adapter');
     this.name = 'paypal-sandbox';
-    this.clientId = clientId;
-    this.clientSecret = clientSecret;
+    this.clientId = normalizedId;
+    this.clientSecret = normalizedSecret;
     this.fetch = fetchImpl;
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.baseUrl = String(baseUrl || '').trim().replace(/\/+$/, '');
     this.brandName = brandName;
     this.invoicerEmail = invoicerEmail;
     this.timeoutMs = normalizeTimeout(timeoutMs);
     this.token = null;
+  }
+
+  environmentName() {
+    let host = '';
+    try { host = new URL(this.baseUrl).hostname.toLowerCase(); } catch { return 'custom'; }
+    if (host.includes('sandbox')) return 'sandbox';
+    if (host === 'api-m.paypal.com' || host === 'api.paypal.com') return 'live';
+    return 'custom';
   }
 
   async accessToken() {
@@ -986,8 +996,24 @@ class PayPalSandboxAdapter {
         },
         body: 'grant_type=client_credentials'
       }, this.timeoutMs, 'PayPal authentication request');
+      this.lastDebugId = response.headers?.get?.('paypal-debug-id') || this.lastDebugId || null;
       const body = await safeJson(response, this.timeoutMs, 'PayPal authentication response');
-      if (!response.ok || !body?.access_token) throw new PayPalError('PayPal authentication failed');
+      if (!response.ok || !body?.access_token) {
+        const status = Number(response.status) || 0;
+        const paypalError = body?.error || body?.name || null;
+        const description = body?.error_description || body?.message || null;
+        const suffix = [status || null, paypalError, description].filter(Boolean).join(' ');
+        const error = new PayPalError(`PayPal authentication failed${suffix ? ` (${suffix})` : ''}`);
+        error.details = {
+          status,
+          paypalError,
+          paypalErrorDescription: description,
+          debugId: this.lastDebugId,
+          environment: this.environmentName(),
+          baseUrl: this.baseUrl
+        };
+        throw error;
+      }
       this.token = { value: body.access_token, expiresAt: Date.now() + Number(body.expires_in || 300) * 1000 };
       return this.token.value;
     } catch (error) {
@@ -1006,7 +1032,14 @@ class PayPalSandboxAdapter {
       }, this.timeoutMs, 'PayPal API request');
       this.lastDebugId = response.headers?.get?.('paypal-debug-id') || this.lastDebugId || null;
       const body = await safeJson(response, this.timeoutMs, 'PayPal API response');
-      if (!response.ok) throw new PayPalError(`PayPal request failed (${response.status})`);
+      if (!response.ok) {
+        const status = Number(response.status) || 0;
+        const paypalError = body?.name || body?.error || null;
+        const description = body?.message || body?.error_description || null;
+        const error = new PayPalError(`PayPal request failed (${status}${paypalError ? ` ${paypalError}` : ''}${description ? `: ${description}` : ''})`);
+        error.details = { status, paypalError, paypalErrorDescription: description, debugId: this.lastDebugId, environment: this.environmentName(), baseUrl: this.baseUrl };
+        throw error;
+      }
       return body;
     } catch (error) {
       if (error.code === 'ETIMEDOUT') throw new PayPalError('PayPal API request timed out');
@@ -1320,13 +1353,13 @@ function buildInsights(invoices, { now = new Date().toISOString(), policy = load
 }
 
 function createPayPalAdapter(env = process.env, options = {}) {
-  const hasId = Boolean(env.PAYPAL_CLIENT_ID);
-  const hasSecret = Boolean(env.PAYPAL_CLIENT_SECRET);
-  if (!hasId && !hasSecret) return new MockPayPalAdapter();
-  if (!hasId || !hasSecret) throw new Error('PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET must both be configured');
+  const clientId = String(env.PAYPAL_CLIENT_ID || '').trim();
+  const clientSecret = String(env.PAYPAL_CLIENT_SECRET || '').trim();
+  if (!clientId && !clientSecret) return new MockPayPalAdapter();
+  if (!clientId || !clientSecret) throw new Error('PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET must both be configured');
   return new PayPalSandboxAdapter({
-    clientId: env.PAYPAL_CLIENT_ID,
-    clientSecret: env.PAYPAL_CLIENT_SECRET,
+    clientId,
+    clientSecret,
     baseUrl: env.PAYPAL_BASE_URL || undefined,
     brandName: env.PAYPAL_BRAND_NAME || undefined,
     invoicerEmail: env.PAYPAL_INVOICER_EMAIL || undefined,

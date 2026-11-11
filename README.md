@@ -477,11 +477,11 @@ Open <http://localhost:3000>. The app starts in `MOCK MODE` with four seeded inv
 PAYPAL_CLIENT_ID=... PAYPAL_CLIENT_SECRET=... npm start
 ```
 
-On Windows PowerShell:
+On Windows PowerShell, use **single quotes** so a `$` inside the secret is not expanded:
 
 ```powershell
-$env:PAYPAL_CLIENT_ID="..."
-$env:PAYPAL_CLIENT_SECRET="..."
+$env:PAYPAL_CLIENT_ID = '...'
+$env:PAYPAL_CLIENT_SECRET = '...'
 npm start
 ```
 
@@ -490,6 +490,14 @@ Check the mode:
 ```sh
 curl -s http://localhost:3000/api/health
 ```
+
+If `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` are set but sending fails with **PayPal authentication failed**, run:
+
+```sh
+npm run paypal:check
+```
+
+It prints the exact PayPal HTTP status, `invalid_client` code, error description, and `PayPal-Debug-Id` without printing secrets. See [PayPal authentication failed](#paypal-authentication-failed-step-by-step).
 
 ### Commands
 
@@ -501,6 +509,7 @@ curl -s http://localhost:3000/api/health
 | `npm run check` | Syntax-check every source, frontend, and script file |
 | `npm run eval` | Run 16 golden parser/planner cases |
 | `npm run backtest` | Regenerate the forecast report |
+| `npm run paypal:check` | Diagnose PayPal client id / secret / environment mismatch |
 | `npm run verify` | `check` + `test` + `eval` |
 | `npm run sandbox:check` | Real PayPal Sandbox evidence run |
 
@@ -535,7 +544,7 @@ Copy [`.env.example`](.env.example) for the full variable list. The app reads va
 | `PAYPAL_CLIENT_ID` | — | Sandbox client id |
 | `PAYPAL_CLIENT_SECRET` | — | Sandbox secret |
 | `PAYPAL_WEBHOOK_ID` | — | Required for verified webhooks |
-| `PAYPAL_BASE_URL` | `https://api-m.sandbox.paypal.com` | PayPal API origin |
+| `PAYPAL_BASE_URL` | `https://api-m.sandbox.paypal.com` | PayPal API origin. Leave unset unless you know the environment matches the credentials. |
 | `PAYPAL_BRAND_NAME` | `Cashflow Copilot` | Checkout brand name |
 | `PAYPAL_INVOICER_EMAIL` | — | Optional invoicer email |
 | `PAYPAL_TIMEOUT_MS` | `10000` | PayPal request timeout (max 120000) |
@@ -578,17 +587,20 @@ If only one of `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` is set, the server re
 ## PayPal Sandbox mode
 
 1. Create a PayPal Developer account at <https://developer.paypal.com/dashboard/>.
-2. Open **Apps & Credentials → Sandbox**, create a REST app, and copy the client id and secret.
+2. Open **Apps & Credentials** and make sure the **Sandbox** tab is selected — not **Live**. Create a REST app, then click **Show** next to the secret and copy the client id and secret. Masked dots or the Live credentials will fail with `invalid_client`.
 3. Create a sandbox **personal** account under **Accounts** to act as the buyer.
-4. Start the server with both credentials:
+4. Start the server with both credentials (PowerShell single quotes):
 
-```sh
-PAYPAL_CLIENT_ID=... PAYPAL_CLIENT_SECRET=... npm start
+```powershell
+$env:PAYPAL_CLIENT_ID = '...'
+$env:PAYPAL_CLIENT_SECRET = '...'
+npm start
 ```
 
-5. Confirm `/api/health` reports `"mode": "sandbox"`.
-6. Create, send, and remind an invoice from the UI.
-7. Generate real evidence:
+5. Confirm `/api/health` reports `"mode": "sandbox"` and `"paypal": { "environment": "sandbox" }`.
+6. Run `npm run paypal:check` if authentication fails; it reports the exact PayPal error and debug id.
+7. Create, send, and remind an invoice from the UI.
+8. Generate real evidence:
 
 ```sh
 PAYPAL_CLIENT_ID=... PAYPAL_CLIENT_SECRET=... \
@@ -596,8 +608,8 @@ SANDBOX_TEST_EMAIL=sb-buyer@business.example.com \
 npm run sandbox:check
 ```
 
-8. Commit the generated JSON under `docs/sandbox-evidence/`.
-9. Create a webhook subscription pointing at `https://YOUR_HOST/api/webhooks/paypal`, set `PAYPAL_WEBHOOK_ID`, and pay an invoice with the sandbox buyer. The timeline should show **Verified PayPal webhook**.
+9. Commit the generated JSON under `docs/sandbox-evidence/`.
+10. Create a webhook subscription pointing at `https://YOUR_HOST/api/webhooks/paypal`, set `PAYPAL_WEBHOOK_ID`, and pay an invoice with the sandbox buyer. The timeline should show **Verified PayPal webhook**.
 
 The step-by-step version, including webhook negative tests and troubleshooting, is in [`docs/SANDBOX_SETUP.md`](docs/SANDBOX_SETUP.md).
 
@@ -1086,7 +1098,7 @@ Full notes, persistence, and cold-start guidance: [`docs/DEPLOY.md`](docs/DEPLOY
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | App says `MOCK MODE` | Missing credential or env not in the server process | Set both `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET`, restart |
-| `PayPal authentication failed` | Wrong id/secret, or live app against sandbox | Regenerate the secret, confirm sandbox |
+| `PayPal authentication failed` | Credentials do not match the environment, or the secret is masked/truncated | Run `npm run paypal:check`; copy from the **Sandbox** tab; regenerate the secret |
 | `PayPal request failed (422)` | Invalid invoice payload, often recipient email or amount | Use a valid sandbox buyer email |
 | `PayPal request failed (404)` | Invoice id from another environment | Recreate in the current environment |
 | Webhook `401` | Missing headers, wrong `PAYPAL_WEBHOOK_ID`, failed verification | Check the header list and webhook id |
@@ -1100,6 +1112,38 @@ Full notes, persistence, and cold-start guidance: [`docs/DEPLOY.md`](docs/DEPLOY
 | Data resets on restart | In-memory store | Set `DATA_FILE` |
 | Render cold start | Free instance spun down | Warm `/api/health` before recording |
 | `npm start` fails on Node < 22 | Unsupported runtime | Use Node 22+ |
+
+### PayPal authentication failed: step by step
+
+This error comes from the OAuth token endpoint, before any invoice is created. The quantity, total, or invoice content is not the cause. Run the diagnostic first:
+
+```sh
+npm run paypal:check
+```
+
+It prints the HTTP status, PayPal error code, description, and `PayPal-Debug-Id` without exposing the credentials. Then check these in order:
+
+1. **Sandbox vs Live tab.** PayPal's Apps & Credentials page has separate **Sandbox** and **Live** credential tabs. The app calls `api-m.sandbox.paypal.com` by default. If you copied Live credentials, PayPal returns `invalid_client`. Select the **Sandbox** tab and copy those values.
+2. **Secret visibility.** Click **Show** (or the eye icon) next to the secret before copying. Copying the masked dots produces a string that looks non-empty but can never authenticate.
+3. **Environment mismatch.** If `PAYPAL_BASE_URL` is set, confirm it matches the credentials. Unset it to use the sandbox default:
+   ```powershell
+   Remove-Item Env:PAYPAL_BASE_URL
+   ```
+4. **PowerShell `$` expansion.** In double quotes, `$` inside a secret is treated as a variable. Use single quotes:
+   ```powershell
+   $env:PAYPAL_CLIENT_ID = '...'
+   $env:PAYPAL_CLIENT_SECRET = '...'
+   ```
+5. **Whitespace or quotes.** Do not include labels, angle brackets, or surrounding quotes. The adapter trims leading/trailing whitespace, but internal newlines still break Basic auth.
+6. **Regenerate the secret.** If the app is old or the secret was rotated, create a new secret in the app and update the env var.
+7. **Restart the server.** Environment variables are read at process start. Stop `npm start`, set the values in the same terminal, and start again.
+8. **Check `/api/health`.** It reports the adapter and PayPal environment:
+   ```json
+   "paypal": { "configured": true, "environment": "sandbox", "baseUrl": "https://api-m.sandbox.paypal.com", "webhookConfigured": false }
+   ```
+9. **Last resort.** Create a new Sandbox REST app and use its client id and secret. This rules out a deleted or disabled app.
+
+On Render, the same values must be set in **Environment** and the service redeployed; local env vars do not reach the hosted instance.
 
 ---
 

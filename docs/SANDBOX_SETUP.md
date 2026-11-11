@@ -103,12 +103,50 @@ If the capture fails, check:
 | Symptom | Likely cause |
 | --- | --- |
 | Still `mock` mode | One credential missing, or env not exported into the server process |
-| `PayPal authentication failed` | Wrong client id/secret, or a live app used against sandbox |
+| `PayPal authentication failed` | Credentials do not match the environment, or the secret is masked/truncated |
 | `PayPal request failed (422)` | Invalid invoice payload (check the recipient email and item amounts) |
 | `PayPal request failed (404)` | Invoice id belongs to a different environment |
 | Webhook 401 | Missing `PAYPAL-*` headers, wrong `PAYPAL_WEBHOOK_ID`, or verification failed |
 | Webhook accepted but no state change | Event is a duplicate or stale for the current lifecycle status |
 | Checkout capture fails | Buyer never approved, or the order expired (PayPal orders expire) |
+
+### `PayPal authentication failed` (401 `invalid_client`)
+
+This is an OAuth failure, not an invoice failure. The app never reached the
+invoice endpoint. Diagnose it with:
+
+```sh
+npm run paypal:check
+```
+
+It prints the HTTP status, PayPal error code/description, and
+`PayPal-Debug-Id` without printing the credentials. Then check:
+
+1. **Wrong dashboard tab.** Apps & Credentials has separate **Sandbox** and
+   **Live** tabs. The app defaults to `https://api-m.sandbox.paypal.com`.
+   Live credentials produce `invalid_client`. Copy from the Sandbox tab.
+2. **Masked secret.** Click **Show** before copying. Masked dots are not a valid
+   secret even though the string is non-empty.
+3. **`PAYPAL_BASE_URL` mismatch.** Unset it to use the sandbox default, or set it
+   to the same environment as the credentials.
+4. **PowerShell interpolation.** Double quotes expand `$` inside a secret. Use:
+   ```powershell
+   $env:PAYPAL_CLIENT_ID = '...'
+   $env:PAYPAL_CLIENT_SECRET = '...'
+   ```
+5. **Whitespace/quotes.** Remove labels, angle brackets, surrounding quotes, and
+   internal newlines. The adapter trims leading/trailing whitespace only.
+6. **Secret rotated or app deleted.** Regenerate the secret or create a new
+   Sandbox REST app.
+7. **Server not restarted.** Environment variables are read at process start.
+
+Confirm the resulting mode with:
+
+```sh
+curl -s http://localhost:3000/api/health
+```
+
+Look for `"mode": "sandbox"` and `"paypal": { "environment": "sandbox" }`.
 
 ## What to commit
 

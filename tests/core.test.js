@@ -314,6 +314,31 @@ test('sandbox adapter uses documented PayPal endpoints and rejects untrusted cer
   assert.equal(await adapter.verifyWebhookSignature(signature), true);
   assert.equal(await adapter.verifyWebhookSignature({ ...signature, certUrl: 'https://evil.example/cert' }), false);
   assert.equal(await adapter.verifyWebhookSignature({ ...signature, certUrl: 'http://api-m.sandbox.paypal.com/cert' }), false);
+
+  const failing = new PayPalSandboxAdapter({
+    clientId: ' client-id ',
+    clientSecret: ' secret ',
+    baseUrl: 'https://api-m.sandbox.paypal.com',
+    fetchImpl: async () => ({
+      ok: false,
+      status: 401,
+      headers: { get: (name) => name === 'paypal-debug-id' ? 'debug-401' : null },
+      json: async () => ({ error: 'invalid_client', error_description: 'Client Authentication failed' })
+    })
+  });
+  await assert.rejects(() => failing.accessToken(), (error) => {
+    assert.equal(error.code, 'PAYPAL_ERROR');
+    assert.match(error.message, /401/);
+    assert.match(error.message, /invalid_client/);
+    assert.match(error.message, /Client Authentication failed/);
+    assert.equal(error.details.status, 401);
+    assert.equal(error.details.environment, 'sandbox');
+    assert.equal(error.details.debugId, 'debug-401');
+    assert.equal(JSON.stringify(error.details).includes('secret'), false);
+    return true;
+  });
+  assert.equal(failing.clientId, 'client-id');
+  assert.equal(failing.clientSecret, 'secret');
 });
 
 test('configured AI extraction falls back deterministically when the provider fails', async () => {
