@@ -166,7 +166,10 @@ If the scope is **MISSING**:
 4. If **Sandbox Accounts** shows only a **Personal** account, that is the cause:
    Invoicing requires a sandbox **Business** merchant. Create a Business account,
    then create a new app and use its credentials.
-5. Restart the server so a fresh token is requested.
+5. Activate Invoicing on the Business merchant: log into
+   <https://www.sandbox.paypal.com> with the business account, open **Invoicing**
+   (or **Tools -> Invoicing**), and complete any setup/terms prompt.
+6. Restart the server so a fresh token is requested.
 
 If the scope is **PRESENT** but the call is still 403:
 
