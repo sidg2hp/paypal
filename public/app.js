@@ -606,6 +606,7 @@
       await api(`/api/invoices/${encodeURIComponent(created.invoice.id)}/send`, { method: 'POST', body: '{}' });
       closeModal();
       await refreshData({ silent: true });
+      openInvoiceDrawer(created.invoice.id);
       showToast(state.mode === 'sandbox' ? 'Invoice approved and sent through PayPal Sandbox.' : 'Invoice approved and sent through the mock adapter.');
     } catch (error) {
       showToast(`Couldn’t send invoice · ${error.message}`);
