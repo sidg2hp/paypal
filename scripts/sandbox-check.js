@@ -102,7 +102,12 @@ async function main() {
     evidence.auditValid = store.verifyAudit().valid;
   } catch (error) {
     evidence.outcome = 'failed';
-    evidence.error = { name: error.name || 'Error', code: error.code || null, message: error.message || 'unknown' };
+    evidence.error = {
+      name: error.name || 'Error',
+      code: error.code || null,
+      message: error.message || 'unknown',
+      details: error.details || null
+    };
     evidence.steps.push({ action: 'aborted', debugId: adapter.lastDebugId || null });
     process.exitCode = 1;
   }
@@ -113,6 +118,12 @@ async function main() {
   fs.writeFileSync(output, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8');
   console.log(`Sandbox evidence: ${evidence.outcome}`);
   for (const step of evidence.steps) console.log(`  ${step.action}: ${step.status || step.message || ''}${step.debugId ? ` · PayPal-Debug-Id ${step.debugId}` : ''}`);
+  if (evidence.error) {
+    console.error(`  ${evidence.error.name}: ${evidence.error.message}`);
+    if (evidence.error.details?.hasInvoicingScope === false) {
+      console.error('  The token does not include the Invoicing scope. Enable Invoicing for the app and use a sandbox Business account.');
+    }
+  }
   console.log(`  wrote ${path.relative(process.cwd(), output)}`);
   if (evidence.outcome !== 'success') console.error('Sandbox run failed. The evidence file records the error for debugging.');
 }
