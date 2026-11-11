@@ -973,6 +973,12 @@ class PayPalSandboxAdapter {
     this.invoicerEmail = invoicerEmail;
     this.timeoutMs = normalizeTimeout(timeoutMs);
     this.token = null;
+    this.scopes = null;
+  }
+
+  hasInvoicingScope() {
+    if (!Array.isArray(this.scopes)) return null;
+    return this.scopes.includes('https://uri.paypal.com/services/invoicing');
   }
 
   environmentName() {
@@ -1015,6 +1021,7 @@ class PayPalSandboxAdapter {
         throw error;
       }
       this.token = { value: body.access_token, expiresAt: Date.now() + Number(body.expires_in || 300) * 1000 };
+      this.scopes = typeof body.scope === 'string' ? body.scope.split(/\s+/).filter(Boolean) : null;
       return this.token.value;
     } catch (error) {
       if (error.code === 'ETIMEDOUT') throw new PayPalError('PayPal authentication request timed out');
@@ -1036,8 +1043,15 @@ class PayPalSandboxAdapter {
         const status = Number(response.status) || 0;
         const paypalError = body?.name || body?.error || null;
         const description = body?.message || body?.error_description || null;
-        const error = new PayPalError(`PayPal request failed (${status}${paypalError ? ` ${paypalError}` : ''}${description ? `: ${description}` : ''})`);
-        error.details = { status, paypalError, paypalErrorDescription: description, debugId: this.lastDebugId, environment: this.environmentName(), baseUrl: this.baseUrl };
+        const hasInvoicingScope = path.includes('/v2/invoicing') ? this.hasInvoicingScope() : null;
+        let hint = '';
+        if (status === 403) {
+          hint = hasInvoicingScope === false
+            ? ' The OAuth token does not include the Invoicing scope. Enable Invoicing for this app in the PayPal Developer Dashboard, restart the server, and retry.'
+            : ' The app authenticated but PayPal refused the action. Confirm the app has the required feature and that the sandbox business account is eligible.';
+        }
+        const error = new PayPalError(`PayPal request failed (${status}${paypalError ? ` ${paypalError}` : ''}${description ? `: ${description}` : ''}).${hint}`);
+        error.details = { status, paypalError, paypalErrorDescription: description, debugId: this.lastDebugId, environment: this.environmentName(), baseUrl: this.baseUrl, hasInvoicingScope };
         throw error;
       }
       return body;

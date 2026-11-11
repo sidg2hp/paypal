@@ -23,6 +23,31 @@ function classifyBaseUrl(baseUrl) {
   }
 }
 
+async function checkInvoicing(baseUrl, accessToken) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(`${baseUrl}/v2/invoicing/invoices?page_size=1&page=1`, {
+      signal: controller.signal,
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' }
+    });
+    const text = await response.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch { body = null; }
+    return {
+      ok: response.ok,
+      status: response.status,
+      debugId: response.headers.get('paypal-debug-id'),
+      paypalError: body?.name || body?.error || null,
+      description: body?.message || body?.error_description || null
+    };
+  } catch (error) {
+    return { ok: false, network: true, message: error.name === 'AbortError' ? 'request timed out' : error.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function shapeWarnings(name, value) {
   const warnings = [];
   if (!value) return warnings;
@@ -112,8 +137,63 @@ async function main() {
 
   if (response.ok && body?.access_token) {
     console.log(`  access token           : received (${String(body.access_token).length} chars, expires in ${body.expires_in || '?'}s)`);
-    console.log('\nResult: SUCCESS - these credentials can obtain a PayPal token.');
-    if (environment.environment === 'sandbox') console.log('  The app should now switch to SANDBOX MODE after a restart.');
+    const scopes = typeof body.scope === 'string' ? body.scope.split(/\s+/).filter(Boolean) : [];
+    const invoicingScope = 'https://uri.paypal.com/services/invoicing';
+    const hasInvoicingScope = scopes.includes(invoicingScope);
+    console.log(`  scopes                 : ${scopes.length || 'not returned by PayPal'}`);
+    if (scopes.length) console.log(`  Invoicing scope        : ${hasInvoicingScope ? 'PRESENT' : 'MISSING'}`);
+
+    console.log('\nInvoicing API check (GET /v2/invoicing/invoices?page_size=1)');
+    const invoicing = await checkInvoicing(baseUrl, body.access_token);
+    if (invoicing.network) {
+      console.log(`  network failure        : ${invoicing.message}`);
+      console.log('\nResult: TOKEN OK, INVOICING CHECK FAILED');
+      console.log('  Authentication succeeded, but the capability check could not reach PayPal.');
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`  HTTP status            : ${invoicing.status}`);
+    console.log(`  PayPal-Debug-Id        : ${invoicing.debugId || '(none)'}`);
+    console.log(`  PayPal error           : ${invoicing.paypalError || '(none)'}`);
+    console.log(`  PayPal error description: ${invoicing.description || '(none)'}`);
+
+    if (invoicing.ok) {
+      console.log('\nResult: SUCCESS - authentication works and the Invoicing API is callable.');
+      if (environment.environment === 'sandbox') console.log('  The app should switch to SANDBOX MODE after a restart.');
+      return;
+    }
+
+    console.log('\nResult: AUTHENTICATION OK, INVOICING PERMISSION FAILED');
+    if (invoicing.status === 403 || invoicing.paypalError === 'NOT_AUTHORIZED') {
+      if (hasInvoicingScope) {
+        console.log('  The token contains the Invoicing scope, but PayPal still refused the call.');
+        console.log('  Most likely causes:');
+        console.log('  1. The app is a Platform/Partner app, not a Merchant REST app.');
+        console.log('     Create a standard Merchant app under Apps & Credentials.');
+        console.log('  2. The sandbox merchant account is not a confirmed Business account.');
+        console.log('     Open Accounts -> Sandbox, create/confirm a Business account, and use an app');
+        console.log('     linked to a merchant that can invoice.');
+        console.log('  3. The account or country is not eligible for Invoicing.');
+        console.log('     Check the Invoicing eligibility list or contact PayPal support with the debug id.');
+      } else if (scopes.length) {
+        console.log('  The OAuth token does NOT include https://uri.paypal.com/services/invoicing.');
+        console.log('  The app authenticated, but its enabled products/scopes do not include Invoicing.');
+        console.log('  1. Open Apps & Credentials -> your app -> Features / Products / Scopes.');
+        console.log('  2. Enable Invoicing for the Sandbox environment (and Checkout if you use Orders v2).');
+        console.log('  3. If there is no Invoicing toggle, create a new Sandbox Merchant REST app.');
+        console.log('  4. Restart the server so a fresh token is requested, then retry.');
+      } else {
+        console.log('  PayPal did not return a scope list, so the cause is likely app type or account eligibility.');
+        console.log('  Create a standard Sandbox Merchant REST app linked to a confirmed Business account.');
+      }
+      console.log('  Then rerun this check. The debug id above is the value to give PayPal support.');
+    } else if (invoicing.status === 401) {
+      console.log('  The access token was rejected on the API call even though the token request succeeded.');
+      console.log('  Regenerate the app credentials and retry.');
+    } else {
+      console.log('  Compare the PayPal error above with the app settings and the Invoicing API docs.');
+    }
+    process.exitCode = 1;
     return;
   }
 

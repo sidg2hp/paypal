@@ -1099,6 +1099,7 @@ Full notes, persistence, and cold-start guidance: [`docs/DEPLOY.md`](docs/DEPLOY
 | --- | --- | --- |
 | App says `MOCK MODE` | Missing credential or env not in the server process | Set both `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET`, restart |
 | `PayPal authentication failed` | Credentials do not match the environment, or the secret is masked/truncated | Run `npm run paypal:check`; copy from the **Sandbox** tab; regenerate the secret |
+| `PayPal request failed (403 NOT_AUTHORIZED)` | OAuth succeeded but the app/token lacks Invoicing permission, or the merchant account is not eligible | Run `npm run paypal:check`; enable Invoicing on the app; use a Merchant app with a sandbox Business account |
 | `PayPal request failed (422)` | Invalid invoice payload, often recipient email or amount | Use a valid sandbox buyer email |
 | `PayPal request failed (404)` | Invoice id from another environment | Recreate in the current environment |
 | Webhook `401` | Missing headers, wrong `PAYPAL_WEBHOOK_ID`, failed verification | Check the header list and webhook id |
@@ -1144,6 +1145,37 @@ It prints the HTTP status, PayPal error code, description, and `PayPal-Debug-Id`
 9. **Last resort.** Create a new Sandbox REST app and use its client id and secret. This rules out a deleted or disabled app.
 
 On Render, the same values must be set in **Environment** and the service redeployed; local env vars do not reach the hosted instance.
+
+### PayPal 403 `NOT_AUTHORIZED`: insufficient permissions
+
+This is different from `PayPal authentication failed`. The OAuth token request succeeded, but PayPal refused the Invoicing API call. The token's `scope` list determines which products the app can call; Invoicing requires:
+
+```text
+https://uri.paypal.com/services/invoicing
+```
+
+Run:
+
+```sh
+npm run paypal:check
+```
+
+The diagnostic now performs a token request **and** a read-only Invoicing API call. It prints:
+
+- whether the token includes the Invoicing scope,
+- the Invoicing API HTTP status,
+- the PayPal error and `PayPal-Debug-Id`.
+
+Then fix in this order:
+
+1. **Enable Invoicing on the app.** Open Apps & Credentials -> your app -> **Features / Products / Scopes** and enable **Invoicing** for the Sandbox environment. If you use checkout links, also enable the payments/checkout product.
+2. **Use a Merchant REST app.** If the app was created as a Platform/Partner app, it may require partner onboarding and auth assertions; a standard Merchant app is the correct type for this project.
+3. **Use a sandbox Business account.** Open **Accounts -> Sandbox** and confirm there is a confirmed **Business** account. Invoicing is a merchant capability; a personal account or an incomplete sandbox business can return `403`.
+4. **Regenerate the token.** Changing app features does not update a cached token. Restart the server so it requests a new token, then retry.
+5. **Create a fresh app/account.** If the feature toggle is missing or the error persists, create a new Sandbox Merchant REST app and a new sandbox Business account, then use that app's client id/secret.
+6. **Check eligibility.** Invoicing is available in many countries but not every account type. If a fresh US sandbox Business account still returns 403, use the debug id with [PayPal Merchant Technical Support](https://www.paypal-support.com/).
+
+The invoice total ($270 in the screenshot) is correct. The 403 happens before PayPal receives the invoice, so quantity, tax, and line items are not the cause.
 
 ---
 

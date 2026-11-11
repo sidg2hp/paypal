@@ -148,6 +148,36 @@ curl -s http://localhost:3000/api/health
 
 Look for `"mode": "sandbox"` and `"paypal": { "environment": "sandbox" }`.
 
+### `PayPal request failed (403 NOT_AUTHORIZED)`
+
+Authentication worked, but PayPal refused the Invoicing call. The token's
+`scope` list is the authoritative answer. `npm run paypal:check` now requests a
+token and makes a read-only Invoicing call, then prints:
+
+- whether `https://uri.paypal.com/services/invoicing` is present,
+- the Invoicing HTTP status and `PayPal-Debug-Id`.
+
+If the scope is **MISSING**:
+
+1. Apps & Credentials -> your app -> Features / Products / Scopes.
+2. Enable **Invoicing** for the Sandbox environment.
+3. If there is no Invoicing toggle, the app type is wrong (for example a
+   Platform/Partner app). Create a standard **Merchant** REST app.
+4. Restart the server so a fresh token is requested.
+
+If the scope is **PRESENT** but the call is still 403:
+
+1. Confirm the sandbox merchant is a confirmed **Business** account.
+2. Confirm the app is linked to a merchant that can invoice.
+3. Check whether the account/country is eligible for Invoicing.
+4. Create a fresh Sandbox Merchant app and Business account.
+5. If it still fails, open a support case with the `PayPal-Debug-Id`; do not
+   send the client secret.
+
+Do not confuse this with `PayPal authentication failed`: that is a 401 on the
+token endpoint. A 403 on `/v2/invoicing/invoices` is a permission/capability
+problem.
+
 ## What to commit
 
 - `docs/sandbox-evidence/*.json` from a successful run.

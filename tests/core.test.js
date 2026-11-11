@@ -339,6 +339,32 @@ test('sandbox adapter uses documented PayPal endpoints and rejects untrusted cer
   });
   assert.equal(failing.clientId, 'client-id');
   assert.equal(failing.clientSecret, 'secret');
+
+  const forbidden = new PayPalSandboxAdapter({
+    clientId: 'client-id',
+    clientSecret: 'secret',
+    baseUrl: 'https://api-m.sandbox.paypal.com',
+    fetchImpl: async (url) => {
+      if (url.endsWith('/v1/oauth2/token')) {
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ access_token: 'token', expires_in: 300, scope: 'https://uri.paypal.com/services/payments' }) };
+      }
+      return {
+        ok: false,
+        status: 403,
+        headers: { get: (name) => name === 'paypal-debug-id' ? 'debug-403' : null },
+        json: async () => ({ name: 'NOT_AUTHORIZED', message: 'Authorization failed due to insufficient permissions.' })
+      };
+    }
+  });
+  await assert.rejects(() => forbidden.createInvoice(invoice), (error) => {
+    assert.match(error.message, /403/);
+    assert.match(error.message, /NOT_AUTHORIZED/);
+    assert.match(error.message, /Invoicing scope/);
+    assert.equal(error.details.status, 403);
+    assert.equal(error.details.hasInvoicingScope, false);
+    assert.equal(error.details.debugId, 'debug-403');
+    return true;
+  });
 });
 
 test('configured AI extraction falls back deterministically when the provider fails', async () => {
