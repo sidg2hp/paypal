@@ -509,7 +509,8 @@ It prints the exact PayPal HTTP status, `invalid_client` code, error description
 | `npm run check` | Syntax-check every source, frontend, and script file |
 | `npm run eval` | Run 16 golden parser/planner cases |
 | `npm run backtest` | Regenerate the forecast report |
-| `npm run paypal:check` | Diagnose PayPal client id / secret / environment mismatch |
+| `npm run paypal:check` | Diagnose PayPal client id / secret / environment mismatch and Invoicing scope |
+| `npm run paypal:checkout` | Test whether Orders v2 checkout is callable (creates an uncaptured $1 order) |
 | `npm run verify` | `check` + `test` + `eval` |
 | `npm run sandbox:check` | Real PayPal Sandbox evidence run |
 
@@ -1176,6 +1177,14 @@ Then fix in this order:
 6. **Check eligibility.** Invoicing is available in many countries but not every account type. If a fresh US sandbox Business account still returns 403, use the debug id with [PayPal Merchant Technical Support](https://www.paypal-support.com/).
 
 The invoice total ($270 in the screenshot) is correct. The 403 happens before PayPal receives the invoice, so quantity, tax, and line items are not the cause.
+
+If Invoicing remains blocked after a fresh Merchant app and Business account, test the Checkout path:
+
+```sh
+npm run paypal:checkout
+```
+
+It creates an **uncaptured** $1.00 sandbox order. If it succeeds, Orders v2 is callable and a Checkout-only live demo is possible; if it also returns 403, the app/account has no live PayPal capability and you should use a different sandbox Business account or contact PayPal support.
 
 ---
 
