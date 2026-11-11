@@ -163,7 +163,10 @@ If the scope is **MISSING**:
 2. Enable **Invoicing** for the Sandbox environment.
 3. If there is no Invoicing toggle, the app type is wrong (for example a
    Platform/Partner app). Create a standard **Merchant** REST app.
-4. Restart the server so a fresh token is requested.
+4. If **Sandbox Accounts** shows only a **Personal** account, that is the cause:
+   Invoicing requires a sandbox **Business** merchant. Create a Business account,
+   then create a new app and use its credentials.
+5. Restart the server so a fresh token is requested.
 
 If the scope is **PRESENT** but the call is still 403:
 

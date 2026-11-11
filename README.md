@@ -1170,7 +1170,7 @@ Then fix in this order:
 
 1. **Enable Invoicing on the app.** Open Apps & Credentials -> your app -> **Features / Products / Scopes** and enable **Invoicing** for the Sandbox environment. If you use checkout links, also enable the payments/checkout product.
 2. **Use a Merchant REST app.** If the app was created as a Platform/Partner app, it may require partner onboarding and auth assertions; a standard Merchant app is the correct type for this project.
-3. **Use a sandbox Business account.** Open **Accounts -> Sandbox** and confirm there is a confirmed **Business** account. Invoicing is a merchant capability; a personal account or an incomplete sandbox business can return `403`.
+3. **Use a sandbox Business account.** Open **Accounts -> Sandbox** and confirm there is a confirmed **Business** account. Invoicing is a merchant capability; a personal account or an incomplete sandbox business can return `403`. If the list shows **only a Personal account**, that is the usual cause of a token with many scopes but no Invoicing scope: create a Business sandbox account, then create a new app and use its credentials.
 4. **Regenerate the token.** Changing app features does not update a cached token. Restart the server so it requests a new token, then retry.
 5. **Create a fresh app/account.** If the feature toggle is missing or the error persists, create a new Sandbox Merchant REST app and a new sandbox Business account, then use that app's client id/secret.
 6. **Check eligibility.** Invoicing is available in many countries but not every account type. If a fresh US sandbox Business account still returns 403, use the debug id with [PayPal Merchant Technical Support](https://www.paypal-support.com/).

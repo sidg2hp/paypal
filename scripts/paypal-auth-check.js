@@ -182,6 +182,9 @@ async function main() {
         console.log('  2. Enable Invoicing for the Sandbox environment (and Checkout if you use Orders v2).');
         console.log('  3. If there is no Invoicing toggle, create a new Sandbox Merchant REST app.');
         console.log('  4. Restart the server so a fresh token is requested, then retry.');
+        console.log('  5. If Sandbox Accounts shows ONLY a Personal account, that is the cause:');
+        console.log('     Invoicing requires a sandbox BUSINESS merchant. Create a Business account,');
+        console.log('     then create a new app and use its credentials.');
       } else {
         console.log('  PayPal did not return a scope list, so the cause is likely app type or account eligibility.');
         console.log('  Create a standard Sandbox Merchant REST app linked to a confirmed Business account.');
