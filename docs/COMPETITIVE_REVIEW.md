@@ -49,7 +49,7 @@ Implementation first.
 
 | Criterion | Our strongest evidence | Remaining gap |
 | --- | --- | --- |
-| Technological implementation | Invoicing v2 + Orders v2 + verified webhooks, 58 tests, agent allowlist, audit chain, OpenAPI contract | Real sandbox evidence file |
+| Technological implementation | Invoicing v2 + Orders v2 + verified webhooks, 59 tests, agent allowlist, audit chain, OpenAPI contract | Real sandbox evidence file |
 | Design | Command center, AG Grid ledger, plan cards, invoice control room, hosted pay page, mobile layout | Recorded walkthrough |
 | Potential impact | Named user (small studio), quantified forecast error, time saved on chasing | A real merchant quote or pilot |
 | Innovation | Payer-aware forecast + policy ledger + verifiable audit for an AR agent | Crowded cluster; needs a crisp first sentence |

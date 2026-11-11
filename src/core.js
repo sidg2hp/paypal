@@ -261,9 +261,9 @@ function extractCustomer(text) {
   // 3. "Invoice for Name" / "Bill to Name" without an email.
   if (!name) {
     const patterns = [
-      /(?:invoice|bill|request)\s+(?:for|to)\s+([^\n,;<(]+?)(?=\s*(?:for\b|due\b|with\b|amount\b|,|;|$))/i,
-      /(?:[Ii]nvoice|[Bb]ill|[Rr]equest)\s+([A-Z][^\n,;<(]{1,80}?)(?=\s*(?:for\b|due\b|with\b|at\b|,|;|$))/,
-      /\b(?:for|to)\s+([A-Z][^\n,;<(]{1,80}?)(?=\s*(?:for\b|due\b|with\b|at\b|,|;|$))/
+      /(?:invoice|bill|request)\s+(?:for|to)\s+([^\n,;<(]+?)(?=\s*(?:\d|for\b|due\b|with\b|amount\b|,|;|$))/i,
+      /(?:[Ii]nvoice|[Bb]ill|[Rr]equest)\s+([A-Z][^\n,;<(]{1,80}?)(?=\s*(?:\d|for\b|due\b|with\b|at\b|,|;|$))/,
+      /\b(?:for|to)\s+([A-Z][^\n,;<(]{1,80}?)(?=\s*(?:\d|for\b|due\b|with\b|at\b|,|;|$))/
     ];
     // Let the case-sensitive name patterns run first so "Invoice Globex for"
     // captures "Globex" instead of the lowercase "for" variant below.
@@ -317,10 +317,67 @@ function parseTaxRate(text) {
 const ITEM_SEGMENT_SPLIT = /\s*;\s*|,\s+(?=\d)|(?:\s+and\s+)(?=\d)/i;
 const ITEM_HEADER_PATTERN = /^(?:(?:please\s+)?(?:create|make|draft|prepare|send|new|raise)\s+)?(?:an?\s+)?(?:invoice|bill)\b/i;
 const ITEM_METADATA_PATTERN = /^\s*(?:tax|currency|due|notes?|customer|client|recipient|reference|invoice\s*(?:number|#)?)\b\s*[:=-]/i;
+const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+// Find "quantity description at price" anywhere in a clause, not only at the
+// start. This is what prevents an invoice header or a customer email from
+// being captured as the line-item description.
+const ITEM_SEARCH_PATTERN = /(?:^|\s)(\d+(?:\.\d+)?)\s*(?:x|×|units?\s+of)?\s+(.+?)\s+(?:at|@|for|each\s+at)\s*[$€£¥₹]?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:each|per\s+[\w/-]+|\/\s*[\w/-]+)?/i;
+
+function stripHeaderAndIdentity(value) {
+  return String(value || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(EMAIL_PATTERN, ' ')
+    .replace(/^\s*(?:please\s+)?(?:(?:create|make|draft|prepare|send|new|raise)\s+)?(?:an?\s+)?(?:invoice|bill)\s*(?:for|to)?\s*/i, '')
+    .replace(/^[\s,;:-]+/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function isBadItemDescription(value) {
+  const text = String(value || '').trim();
+  if (!text) return true;
+  if (EMAIL_PATTERN.test(text)) return true;
+  if (/^(?:invoice|bill|create|make|draft|prepare|send|new|raise|customer|client|recipient|bill\s*to)\b/i.test(text)) return true;
+  if (/^(?:tax|due|currency|notes?|reference|subtotal|total)\b\s*(?:[:=-]|\d|$)/i.test(text)) return true;
+  return false;
+}
+
+// A description that still contains "1 brand review session at" is a fragment
+// of an item whose quantity/price were captured by a broader pattern.
+function looksLikeEmbeddedItem(value) {
+  const text = String(value || '').trim();
+  return /\b\d+(?:\.\d+)?\s+\S.*\b(?:at|for)\s*$/i.test(text)
+    || /\bfor\s+(?:an?\s+)?[A-Za-z].*\bat\s*$/i.test(text);
+}
+
+function parseItemFromSearch(value) {
+  const match = String(value || '').match(ITEM_SEARCH_PATTERN);
+  if (!match) return null;
+  const quantity = Number(match[1]);
+  const description = cleanItemDescription(match[2]);
+  const unitPrice = Number(match[3].replace(/,/g, ''));
+  if (isBadItemDescription(description) || looksLikeEmbeddedItem(description)) return null;
+  if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice)) return null;
+  return { description, quantity, unitPrice };
+}
+
+// "for a brand review session at $125" has no explicit quantity. Treat it as
+// one unit instead of letting the broad description+price pattern swallow the
+// customer name and the word "for".
+function parseItemFromForClause(value) {
+  const match = String(value || '').match(/\b(?:for|of)\s+(?:an?\s+)?(.+?)\s+(?:at|@|for)\s*[$€£¥₹]?\s*([\d,]+(?:\.\d{1,2})?)/i);
+  if (!match) return null;
+  const description = cleanItemDescription(match[1]);
+  const unitPrice = Number(match[2].replace(/,/g, ''));
+  if (isBadItemDescription(description) || looksLikeEmbeddedItem(description)) return null;
+  if (!description || !Number.isFinite(unitPrice)) return null;
+  return { description, quantity: 1, unitPrice };
+}
 
 function cleanItemDescription(value) {
   return String(value || '')
     .replace(/<[^>]*>/g, ' ')
+    .replace(EMAIL_PATTERN, ' ')
     .replace(/[,.]\s*$/, '')
     .replace(/\s+(?:each|apiece)$/i, '')
     .replace(/\s+per\s+(?:hour|unit|item|session|day)$/i, '')
@@ -330,12 +387,17 @@ function cleanItemDescription(value) {
 }
 
 function matchItemSegment(segment) {
-  const candidate = segment
+  let candidate = segment
     .replace(/^\s*[-*•]\s*/, '')
     .replace(/^\s*(?:for|of|line\s*item\s*\d*\s*[:.-]?)\s+/i, '')
     .replace(/[\s,;]+$/, '')
     .trim();
+  candidate = stripHeaderAndIdentity(candidate);
   if (!candidate || ITEM_METADATA_PATTERN.test(candidate)) return null;
+  const searched = parseItemFromSearch(candidate);
+  if (searched) return searched;
+  const forClause = parseItemFromForClause(candidate);
+  if (forClause) return forClause;
   const patterns = [
     /^(\d+(?:\.\d+)?)\s*(?:x|×|units?\s+of)?\s+(.+?)\s+(?:at|@|x|for|each\s+at)\s*[$€£¥₹]?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:each|per\s+[\w/-]+|\/\s*[\w/-]+)?\s*$/i,
     /^(.+?)\s*[-–—:]\s*(\d+(?:\.\d+)?)\s*(?:x|×)?\s*[$€£¥₹]?\s*([\d,]+(?:\.\d{1,2})?)\s*$/i,
@@ -348,6 +410,7 @@ function matchItemSegment(segment) {
     const quantity = index === 0 || index === 2 ? Number(match[1]) : index === 1 ? Number(match[2]) : 1;
     const description = cleanItemDescription(index === 1 ? match[1] : index === 3 ? match[1] : match[2]);
     const unitPrice = Number((index === 0 ? match[3] : index === 1 ? match[3] : index === 2 ? match[3] : match[2]).replace(/,/g, ''));
+    if (isBadItemDescription(description) || looksLikeEmbeddedItem(description)) continue;
     if (!description || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice)) continue;
     return { description, quantity, unitPrice };
   }
@@ -375,11 +438,20 @@ function parseItems(text) {
     if (item) items.push(item);
   }
   if (items.length === 0) {
-    const fallback = text.match(/(?:for|of)\s+(.+?)\s+(?:at|for)\s*[$€£¥₹]?\s*([\d,]+(?:\.\d{1,2})?)/i);
+    // Last resort: search the whole prompt (minus header/email) for a
+    // quantity-description-price clause. This also covers prompts that put the
+    // customer and the item on one line without a "for" before the quantity.
+    const searched = parseItemFromSearch(stripHeaderAndIdentity(text));
+    if (searched) items.push(searched);
+  }
+  if (items.length === 0) {
+    const fallback = text.match(/(?:for|of)\s+(?:an?\s+)?(.+?)\s+(?:at|for)\s*[$€£¥₹]?\s*([\d,]+(?:\.\d{1,2})?)/i);
     if (fallback) {
       const description = cleanItemDescription(fallback[1]);
       const unitPrice = Number(fallback[2].replace(/,/g, ''));
-      if (description && Number.isFinite(unitPrice)) items.push({ description, quantity: 1, unitPrice });
+      if (description && !isBadItemDescription(description) && !looksLikeEmbeddedItem(description) && Number.isFinite(unitPrice)) {
+        items.push({ description, quantity: 1, unitPrice });
+      }
     }
   }
   return items;

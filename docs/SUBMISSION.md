@@ -128,7 +128,7 @@ invoice" demos. This project owns the harder half:
 
 ### Evidence
 
-- `npm test` — 58 offline tests.
+- `npm test` — 59 offline tests.
 - `npm run eval` — 16/16 golden parser/planner cases.
 - `npm run backtest` — 70.4% MAE improvement (committed report).
 - `npm run check` — syntax checks across every source file.

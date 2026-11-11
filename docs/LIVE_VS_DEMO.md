@@ -22,7 +22,7 @@ long-form version of those labels.
 
 ## What is verified by automated tests
 
-These claims are pinned by `npm test` (58 tests, offline):
+These claims are pinned by `npm test` (59 tests, offline):
 
 - Natural-language parsing for the exact demo prompts and eight other goldens.
 - Cent-safe totals and strict invoice validation.

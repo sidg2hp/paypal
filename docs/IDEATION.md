@@ -79,6 +79,6 @@ agent with a measurable forecast and a verifiable audit trail**.
 - [x] Agent plan with per-step approval and allowlisted tools.
 - [x] Hosted customer pay page with PayPal Checkout.
 - [x] Hash-chained audit trail.
-- [x] 58 offline tests, 16 golden evaluation cases, a reproducible backtest.
+- [x] 59 offline tests, 16 golden evaluation cases, a reproducible backtest.
 - [x] OpenAPI contract, APIMatic build directory, Render Blueprint, Dockerfile,
       Postman collection.

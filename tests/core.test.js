@@ -63,6 +63,31 @@ test('parser handles the exact demo prompts without dropping the whole line', ()
   assert.equal(second.dueDate, '2026-11-30');
 });
 
+test('parser never turns an invoice header or customer email into a line item', () => {
+  const sandboxEmail = 'sb-vj6st53751629@personal.example.com';
+  const variants = [
+    `Invoice Acme Design Co ${sandboxEmail} 1 brand review session at $125, tax 8%, due in 15 days`,
+    `Invoice Acme Design Co <${sandboxEmail}> 1 brand review session at $125, tax 8%, due in 15 days`,
+    `Invoice Acme Design Co ${sandboxEmail} for a brand review session at $125, tax 8%, due in 15 days`,
+    `Invoice Acme Design Co ${sandboxEmail} 1 brand review session at 125, tax 8%, due in 15 days`,
+    `Invoice Acme Design Co <${sandboxEmail}> 1 brand review session at $125\ntax 8%\ndue in 15 days`
+  ];
+  for (const text of variants) {
+    const parsed = parseInvoiceText(text, { now: new Date('2026-11-11T00:00:00.000Z') });
+    assert.equal(parsed.customer.name, 'Acme Design Co');
+    assert.equal(parsed.customer.email, sandboxEmail);
+    assert.deepEqual(parsed.items, [{ description: 'brand review session', quantity: 1, unitPrice: 125, amount: 125 }]);
+    assert.equal(parsed.total, 135);
+    assert.equal(parsed.dueDate, '2026-11-26');
+    assert.equal(/@/.test(parsed.items[0].description), false);
+  }
+
+  const noEmail = parseInvoiceText('Invoice Acme Design Co 1 brand review session at $125, tax 8%, due in 15 days', { now: new Date('2026-11-11T00:00:00.000Z') });
+  assert.equal(noEmail.customer.name, 'Acme Design Co');
+  assert.deepEqual(noEmail.items, [{ description: 'brand review session', quantity: 1, unitPrice: 125, amount: 125 }]);
+  assert.equal(noEmail.total, 135);
+});
+
 test('parser handles labels, multiple items, thousands separators, net terms and currency symbols', () => {
   const bill = parseInvoiceText('Bill to Harbor and Pine, 3 logo sketches at $80 each and 2 revisions at $40 each, 7.5% tax, net 30', { now: new Date('2026-11-07T00:00:00.000Z') });
   assert.equal(bill.customer.name, 'Harbor and Pine');

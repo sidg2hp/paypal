@@ -27,7 +27,7 @@ video.
   invoice drawer, audit timeline, and a customer pay page.
 - Security: CSP, frame denial, nosniff, no-referrer, same-origin enforcement,
   per-IP rate limits, optional demo reset token, secret-free health.
-- 58 offline tests, 16 golden evaluation cases, syntax checks, OpenAPI 3.1
+- 59 offline tests, 16 golden evaluation cases, syntax checks, OpenAPI 3.1
   contract, APIMatic build directory and vendored PayPal context plugin,
   Render Blueprint, Dockerfile, Postman collection.
 
@@ -53,7 +53,7 @@ video.
 
 - [ ] Node 22+ installed.
 - [ ] `npm ci` succeeds.
-- [ ] `npm test` → 58 passing.
+- [ ] `npm test` → 59 passing.
 - [ ] `npm run eval` → 16/16.
 - [ ] `npm run check` → clean.
 - [ ] `npm run backtest` → writes the report with 70.4% improvement.
@@ -101,7 +101,7 @@ video.
 The repository was verified on Node 24.21.0 with `npm install`-free execution:
 
 ```text
-58 tests passed
+59 tests passed
 16/16 golden evaluation cases passed
 npm run check passed
 npm run backtest: 70.4% MAE improvement

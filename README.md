@@ -2,7 +2,7 @@
 
 ![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-0f766e?logo=node.js&logoColor=white)
 ![No runtime dependencies](https://img.shields.io/badge/runtime-zero%20dependencies-2563eb)
-![Tests 58 passing](https://img.shields.io/badge/tests-58%20passing-16a34a)
+![Tests 59 passing](https://img.shields.io/badge/tests-59%20passing-16a34a)
 ![Golden evals 16/16](https://img.shields.io/badge/evals-16%2F16-0f766e)
 ![License MIT](https://img.shields.io/badge/license-MIT-7c3aed)
 
@@ -497,7 +497,7 @@ curl -s http://localhost:3000/api/health
 | --- | --- |
 | `npm start` | Start the server on `PORT` (default 3000) |
 | `npm run dev` | Start with Node's watch mode |
-| `npm test` | Run 58 offline tests |
+| `npm test` | Run 59 offline tests |
 | `npm run check` | Syntax-check every source, frontend, and script file |
 | `npm run eval` | Run 16 golden parser/planner cases |
 | `npm run backtest` | Regenerate the forecast report |
@@ -990,7 +990,7 @@ We evaluated **Bryntum**, **Channel3**, and **Elastic** and did not force them i
 ### Automated suite
 
 ```text
-npm test        58 passing
+npm test        59 passing
 npm run eval    16/16 golden cases
 npm run check   syntax checks across src/, public/, scripts/
 npm run backtest  70.4% MAE improvement over the due-date baseline

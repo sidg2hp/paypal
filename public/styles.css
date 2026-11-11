@@ -268,3 +268,10 @@
   .runway-foot { margin-top: 10px; }
   .metric-bottom { display: flex; flex-wrap: wrap; gap: 4px; }
 }
+
+/* Keep the review modal from growing horizontally when a field contains a
+   long unbroken value (for example an email address). */
+#form-items, .item-row, .item-row label, .form-grid label, .extraction-note > div { min-width: 0; }
+.item-row input, .form-grid input, .form-grid select { min-width: 0; width: 100%; }
+.draft-modal { overflow-x: hidden; }
+.extraction-note small { overflow-wrap: anywhere; }
